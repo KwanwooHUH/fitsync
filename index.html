@@ -865,6 +865,7 @@
   <div style="display:flex;align-items:center;gap:16px">
   <div class="logo">FIT<span>SYNC</span></div>
   <button onclick="resetData()" style="background:none;border:none;color:var(--text-dim);font-size:11px;cursor:pointer;padding:4px 8px;border-radius:6px;transition:color .15s" title="데이터 초기화" onmouseover="this.style.color='var(--danger)'" onmouseout="this.style.color='var(--text-dim)'">↺ 초기화</button>
+  <button onclick="requestNotificationPermission()" id="notifBtn" style="background:none;border:1px solid var(--border);color:var(--text-muted);font-size:11px;cursor:pointer;padding:5px 10px;border-radius:6px;font-family:'Noto Sans KR',sans-serif;transition:all .15s" title="푸시 알림 설정">🔔 알림</button>
   <div id="fbStatus" style="font-size:11px;padding:4px 10px;border-radius:6px;background:rgba(255,184,79,.1);border:1px solid rgba(255,184,79,.3);color:#ffb84f">⏳ 연결 중</div>
 </div>
   <div style="display:flex;align-items:center;gap:10px">
@@ -1601,6 +1602,12 @@ function applyLogin() {
   if(!currentUser) return;
   // 세션 저장 (새로고침 후 복원)
   try { sessionStorage.setItem('fitsync_user', JSON.stringify(currentUser)); } catch(e) {}
+  // 로그인 후 알림 버튼 상태 업데이트
+  setTimeout(() => {
+    if (Notification.permission === 'granted') scheduleReminders();
+    const btn = document.getElementById('notifBtn');
+    if (btn) btn.textContent = Notification.permission === 'granted' ? '🔔 알림 ON' : '🔔 알림';
+  }, 500);
   if(currentUser.role === 'trainer') {
     state.role = 'trainer';
     state.selectedMember = null;
@@ -2692,6 +2699,144 @@ function resetData() {
   changeReqId = 1;
   showToast('데이터가 초기화되었습니다.', 'info');
   renderAll(); // saveData 내부에서 Firestore도 초기화됨
+}
+
+
+// ══════════════════════════════════════════
+//  PUSH NOTIFICATION
+// ══════════════════════════════════════════
+
+// 서비스 워커 등록
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', () => {
+    navigator.serviceWorker.register('/fitsync/sw.js')
+      .then(reg => { window._swReg = reg; })
+      .catch(e => console.warn('SW 등록 실패:', e));
+  });
+}
+
+// 알림 권한 요청
+function requestNotificationPermission() {
+  if (!('Notification' in window)) {
+    showToast('이 브라우저는 알림을 지원하지 않습니다.', 'error');
+    return;
+  }
+  if (Notification.permission === 'granted') {
+    showToast('알림이 이미 허용되어 있습니다. ✅', 'success');
+    return;
+  }
+  Notification.requestPermission().then(permission => {
+    if (permission === 'granted') {
+      showToast('알림이 허용되었습니다! 내일 수업 전 알림을 받을 수 있어요. 🔔', 'success');
+      scheduleReminders();
+    } else {
+      showToast('알림이 거부되었습니다. 브라우저 설정에서 허용해주세요.', 'error');
+    }
+  });
+}
+
+// 알림 보내기 (서비스 워커 또는 직접)
+function sendNotification(title, body, tag) {
+  if (Notification.permission !== 'granted') return;
+  if (window._swReg) {
+    window._swReg.showNotification(title, {
+      body, tag,
+      icon:    '/fitsync/icon-192.png',
+      vibrate: [200, 100, 200],
+      data:    'https://kwanwoohuh.github.io/fitsync/',
+    });
+  } else {
+    new Notification(title, { body, tag });
+  }
+}
+
+// 하루 전 알림 스케줄링
+function scheduleReminders() {
+  if (Notification.permission !== 'granted') return;
+  if (!currentUser) return;
+
+  const now       = new Date();
+  const tomorrow  = new Date(now);
+  tomorrow.setDate(tomorrow.getDate() + 1);
+  const tomorrowStr = fmt(tomorrow);
+
+  let reminders = [];
+
+  if (currentUser.role === 'trainer') {
+    // 트레이너: 내일 확정 수업 전체
+    const tmRes = data.reservations.filter(r =>
+      r.date === tomorrowStr && r.status === 'confirmed' && !r.completed
+    );
+    if (tmRes.length > 0) {
+      reminders.push({
+        title: '🏋️ 내일 PT 수업 알림',
+        body:  `내일 확정된 수업이 ${tmRes.length}건 있습니다.`,
+        tag:   'trainer-reminder-' + tomorrowStr,
+      });
+    }
+    // 대기 신청 있는 경우
+    const waiting = data.reservations.filter(r =>
+      r.date === tomorrowStr && r.status === 'pending'
+    );
+    if (waiting.length > 0) {
+      reminders.push({
+        title: '⏳ 미확정 예약 알림',
+        body:  `내일 확정 대기 중인 예약이 ${waiting.length}건 있습니다.`,
+        tag:   'trainer-waiting-' + tomorrowStr,
+      });
+    }
+  } else {
+    // 회원: 본인 내일 수업
+    const myId  = currentUser.memberId;
+    const myRes = data.reservations.filter(r =>
+      r.date === tomorrowStr &&
+      +r.memberId === +myId &&
+      (r.status === 'confirmed' || r.status === 'pending') &&
+      !r.completed
+    );
+    if (myRes.length > 0) {
+      const me = getMember(myId);
+      myRes.forEach(r => {
+        reminders.push({
+          title: '🏋️ 내일 PT 수업 알림',
+          body:  `${me?.name || ''}님, 내일 ${r.hour}:00 PT 수업이 있습니다. 잊지 마세요!`,
+          tag:   'member-reminder-' + tomorrowStr + '-' + r.hour,
+        });
+      });
+    }
+  }
+
+  // 오늘 저녁 9시에 알림 보내기
+  const alertTime = new Date(now);
+  alertTime.setHours(21, 0, 0, 0);
+
+  // 이미 9시 지났으면 즉시 테스트 알림 (10초 후)
+  const delay = alertTime > now
+    ? alertTime.getTime() - now.getTime()
+    : 10000;
+
+  reminders.forEach((r, i) => {
+    setTimeout(() => sendNotification(r.title, r.body, r.tag), delay + i * 2000);
+  });
+
+  if (reminders.length > 0) {
+    const timeStr = alertTime > now ? '오늘 저녁 9시에' : '잠시 후';
+    showToast(`${timeStr} 내일 수업 알림 ${reminders.length}건이 예정되었습니다. 🔔`, 'info');
+  }
+}
+
+// 알림 테스트 (즉시)
+function testNotification() {
+  if (Notification.permission !== 'granted') {
+    requestNotificationPermission();
+    return;
+  }
+  sendNotification(
+    '🔔 FITSYNC 알림 테스트',
+    '알림이 정상적으로 작동하고 있습니다!',
+    'test-' + Date.now()
+  );
+  showToast('테스트 알림을 보냈습니다!', 'success');
 }
 
 // ── INIT ──
