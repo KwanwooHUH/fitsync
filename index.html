@@ -706,41 +706,44 @@
   .week-day-num.today-num { color:var(--accent); }
 
   .week-time-label {
-    height:52px; display:flex; align-items:flex-start; justify-content:flex-end;
+    min-height:52px; display:flex; align-items:flex-start; justify-content:flex-end;
     padding:6px 10px 0 0; font-size:10px; color:var(--text-dim);
     font-family:'Space Grotesk',sans-serif; border-bottom:1px solid var(--border);
     background:var(--surface);
   }
   .week-cell {
-    height:52px; border-left:1px solid var(--border); border-bottom:1px solid var(--border);
-    position:relative; cursor:pointer; transition:background .15s;
-    padding:2px 3px;
+    min-height:52px; border-left:1px solid var(--border); border-bottom:1px solid var(--border);
+    position:relative; transition:background .15s;
+    padding:2px 3px; cursor:default;
+    display:flex; flex-direction:column; gap:2px;
   }
   .week-cell:hover { background:var(--surface2); }
   .week-cell.blocked-cell { background:repeating-linear-gradient(45deg,transparent,transparent 4px,rgba(255,255,255,.015) 4px,rgba(255,255,255,.015) 8px); cursor:default; }
   .week-cell.blocked-cell:hover { background:repeating-linear-gradient(45deg,transparent,transparent 4px,rgba(255,255,255,.015) 4px,rgba(255,255,255,.015) 8px); }
 
   .week-event {
-    border-radius:5px; padding:3px 5px; font-size:10px; font-weight:600;
+    border-radius:5px; padding:4px 6px; font-size:10px; font-weight:600;
     overflow:hidden; white-space:nowrap; text-overflow:ellipsis;
-    cursor:pointer; transition:opacity .15s; line-height:1.3; height:100%;
-    display:flex; flex-direction:column; justify-content:center;
+    cursor:pointer; transition:opacity .15s; line-height:1.4;
+    display:flex; flex-direction:row; align-items:center; justify-content:space-between;
+    gap:4px; width:100%; box-sizing:border-box; flex-shrink:0;
   }
+  .week-event:hover { opacity:0.85; }
   .week-event.confirmed { background:rgba(79,255,176,.18); border-left:2px solid var(--member); color:var(--text); }
   .week-event.pending   { background:rgba(79,184,255,.14); border-left:2px solid var(--trainer); color:var(--text); }
   .week-event.change-pending { border-left-color:#a78bfa !important; }
   .week-open {
-    width:100%; height:100%; display:flex; align-items:center; justify-content:center;
+    width:100%; flex:1; min-height:44px; display:flex; align-items:center; justify-content:center;
     font-size:11px; color:var(--text-dim); border:1px dashed transparent;
-    border-radius:5px; transition:all .15s;
+    border-radius:5px; transition:all .15s; cursor:pointer;
   }
-  .week-cell:hover .week-open { border-color:var(--accent); color:var(--accent); }
+  .week-open:hover { border-color:var(--accent); color:var(--accent); }
   .week-closed {
-    width:100%; height:100%; display:flex; align-items:center; justify-content:center;
+    width:100%; min-height:44px; flex:1; display:flex; align-items:center; justify-content:center;
     font-size:12px; color:rgba(255,79,123,.4);
   }
   .week-waitlist {
-    width:100%; height:100%; display:flex; align-items:center; justify-content:center;
+    width:100%; min-height:44px; flex:1; display:flex; align-items:center; justify-content:center;
     font-size:11px; color:#ffb84f; border:1px dashed rgba(255,184,79,.4);
     border-radius:5px; cursor:pointer; transition:all .15s;
   }
@@ -1373,14 +1376,16 @@ function renderWeekView(ds) {
             const displayName = isGuest ? (res.guestName||'방문자') : (m?.name||'?');
             const statusIcon  = res.completed?'✔':chg?'🔄':sc==='confirmed'?'✅':'⏳';
             const typeIcon    = resType==='consult'?'💬':resType==='trial'?'⭐':'';
-            return `<div class="week-event ${sc}${chg?' change-pending':''}" onclick="openResDetail(${+res.id})"
-              style="background:${memberColor}22;border-left-color:${memberColor};margin-bottom:1px">
-              <span style="color:${memberColor};font-weight:700;font-size:10px">${typeIcon}${displayName}</span>
-              <span style="font-size:9px;opacity:.8">${statusIcon}</span>
+            // onclick을 이벤트 블록 자체에만 — event.stopPropagation으로 버블링 차단
+            return `<div class="week-event ${sc}${chg?' change-pending':''}"
+              onclick="event.stopPropagation();openResDetail(${+res.id})"
+              style="background:${memberColor}22;border-left:3px solid ${memberColor}">
+              <span style="color:${memberColor};font-weight:700;font-size:10px;overflow:hidden;text-overflow:ellipsis">${typeIcon}${displayName}</span>
+              <span style="font-size:9px;opacity:.8;flex-shrink:0">${statusIcon}</span>
             </div>`;
           }).join('');
         } else if(slot) {
-          cellInner = `<div class="week-open" onclick="openAddResModal('${wd}',${h})">+</div>`;
+          cellInner = `<div class="week-open" onclick="event.stopPropagation();openAddResModal('${wd}',${h})">+</div>`;
         } else {
           cellClass = ' blocked-cell';
         }
@@ -1395,10 +1400,11 @@ function renderWeekView(ds) {
           const myM   = getMember(myRes.memberId);
           const myCol = myM?.color || 'var(--member)';
           const myIcon = myRes.completed?'✔':chg?'🔄':sc==='confirmed'?'✅':'⏳';
-          cellInner = `<div class="week-event ${sc}${chg?' change-pending':''}" onclick="openResDetail(${+myRes.id})"
-            style="background:${myCol}22;border-left-color:${myCol}">
-            <span style="color:${myCol};font-weight:700">내 수업</span>
-            <span style="font-size:9px;opacity:.8">${myIcon}</span>
+          cellInner = `<div class="week-event ${sc}${chg?' change-pending':''}"
+            onclick="event.stopPropagation();openResDetail(${+myRes.id})"
+            style="background:${myCol}22;border-left:3px solid ${myCol}">
+            <span style="color:${myCol};font-weight:700;overflow:hidden;text-overflow:ellipsis">내 수업</span>
+            <span style="font-size:9px;opacity:.8;flex-shrink:0">${myIcon}</span>
           </div>`;
         } else if(otherRes) {
           // 내가 이미 대기 신청했는지 확인
@@ -1409,10 +1415,10 @@ function renderWeekView(ds) {
               <span style="font-size:9px;opacity:.8">⏳</span>
             </div>`;
           } else {
-            cellInner = `<div class="week-waitlist" onclick="requestWaitlist('${wd}',${h})">⏳ 대기신청</div>`;
+            cellInner = `<div class="week-waitlist" onclick="event.stopPropagation();requestWaitlist('${wd}',${h})">⏳ 대기신청</div>`;
           }
         } else if(slot) {
-          cellInner = `<div class="week-open" onclick="bookSlot('${wd}',${h})">+</div>`;
+          cellInner = `<div class="week-open" onclick="event.stopPropagation();bookSlot('${wd}',${h})">+</div>`;
         } else {
           cellClass = ' blocked-cell';
         }
