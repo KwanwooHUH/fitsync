@@ -29,6 +29,23 @@
       db.settings({ experimentalForceLongPolling: true, merge: true });
     }
   } catch(e) {}
+  // FCM 메시징 초기화 (HTTPS에서만 동작)
+  if (location.protocol === 'https:' && 'serviceWorker' in navigator) {
+    try {
+      const messaging = firebase.messaging();
+      // 포그라운드 메시지 수신
+      messaging.onMessage(payload => {
+        const { title, body } = payload.notification || {};
+        if (Notification.permission === 'granted') {
+          new Notification(title || 'FITSYNC', {
+            body:  body || '알림이 있습니다.',
+            icon:  '/fitsync/icon-192.png',
+          });
+        }
+      });
+      window._fcmMessaging = messaging;
+    } catch(e) { console.warn('FCM 초기화 실패:', e); }
+  }
   const DOC_REF = db.collection('fitsync').doc('shared');
   window._docRef  = DOC_REF;
   window._fbReady = false;
@@ -164,14 +181,16 @@
   header {
     background: var(--surface);
     border-bottom: 1px solid var(--border);
-    padding: 0 24px;
+    padding: 0 16px;
     display: flex;
     align-items: center;
     justify-content: space-between;
-    height: 64px;
+    height: 56px;
     position: sticky;
     top: 0;
     z-index: 100;
+    gap: 8px;
+    overflow: hidden;
   }
 
   .logo {
@@ -862,15 +881,23 @@
 
 <!-- HEADER -->
 <header>
-  <div style="display:flex;align-items:center;gap:16px">
+  <!-- 로고 -->
   <div class="logo">FIT<span>SYNC</span></div>
-  <button onclick="resetData()" style="background:none;border:none;color:var(--text-dim);font-size:11px;cursor:pointer;padding:4px 8px;border-radius:6px;transition:color .15s" title="데이터 초기화" onmouseover="this.style.color='var(--danger)'" onmouseout="this.style.color='var(--text-dim)'">↺ 초기화</button>
-  <button onclick="requestNotificationPermission()" id="notifBtn" style="background:none;border:1px solid var(--border);color:var(--text-muted);font-size:11px;cursor:pointer;padding:5px 10px;border-radius:6px;font-family:'Noto Sans KR',sans-serif;transition:all .15s" title="푸시 알림 설정">🔔 알림</button>
-  <div id="fbStatus" style="font-size:11px;padding:4px 10px;border-radius:6px;background:rgba(255,184,79,.1);border:1px solid rgba(255,184,79,.3);color:#ffb84f">⏳ 연결 중</div>
-</div>
-  <div style="display:flex;align-items:center;gap:10px">
-    <div id="loginUserBadge" style="font-size:13px;font-weight:600;color:var(--text-muted)"></div>
-    <button onclick="doLogout()" style="background:rgba(255,79,123,.1);border:1px solid rgba(255,79,123,.25);color:var(--danger);font-size:12px;font-weight:600;cursor:pointer;padding:6px 12px;border-radius:8px;font-family:'Noto Sans KR',sans-serif">로그아웃</button>
+
+  <!-- 오른쪽 영역 -->
+  <div style="display:flex;align-items:center;gap:8px;flex-shrink:0">
+    <!-- 연결 상태 -->
+    <div id="fbStatus" style="font-size:10px;padding:3px 8px;border-radius:6px;background:rgba(255,184,79,.1);border:1px solid rgba(255,184,79,.3);color:#ffb84f;white-space:nowrap">⏳</div>
+    <!-- 알림 버튼 -->
+    <button onclick="requestNotificationPermission()" id="notifBtn"
+      style="background:none;border:1px solid var(--border);color:var(--text-muted);font-size:12px;cursor:pointer;padding:5px 8px;border-radius:6px;font-family:'Noto Sans KR',sans-serif;white-space:nowrap"
+      title="푸시 알림">🔔</button>
+    <!-- 유저 정보 + 로그아웃 -->
+    <div id="loginUserBadge" style="font-size:12px;font-weight:600;color:var(--text-muted);white-space:nowrap;max-width:80px;overflow:hidden;text-overflow:ellipsis"></div>
+    <button onclick="doLogout()"
+      style="background:rgba(255,79,123,.1);border:1px solid rgba(255,79,123,.25);color:var(--danger);font-size:11px;font-weight:600;cursor:pointer;padding:5px 10px;border-radius:8px;font-family:'Noto Sans KR',sans-serif;white-space:nowrap">로그아웃</button>
+    <!-- 초기화 (점 메뉴로 숨김) -->
+    <button onclick="resetData()" style="background:none;border:none;color:var(--text-dim);font-size:14px;cursor:pointer;padding:4px;border-radius:4px" title="데이터 초기화">↺</button>
   </div>
 </header>
 
@@ -2709,7 +2736,7 @@ function resetData() {
 // 서비스 워커 등록
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
-    navigator.serviceWorker.register('/fitsync/sw.js')
+    navigator.serviceWorker.register('/fitsync/sw.js', { scope: '/fitsync/' })
       .then(reg => { window._swReg = reg; })
       .catch(e => console.warn('SW 등록 실패:', e));
   });
@@ -2727,7 +2754,31 @@ function requestNotificationPermission() {
   }
   Notification.requestPermission().then(permission => {
     if (permission === 'granted') {
-      showToast('알림이 허용되었습니다! 내일 수업 전 알림을 받을 수 있어요. 🔔', 'success');
+      showToast('알림이 허용되었습니다! 🔔', 'success');
+      // FCM 토큰 등록 (백그라운드 알림용)
+      if (window._fcmMessaging) {
+        // VAPID 키: Firebase Console > 프로젝트 설정 > 클라우드 메시징 > 웹 푸시 인증서
+        // 아래 키를 실제 VAPID 공개키로 교체하세요
+        window._fcmMessaging.getToken({
+          vapidKey: 'BGylhemxGoeohzCO-mH2MeqKTeNd39-3QwuR4kfLyzdXBSC75tFap_f1aaVE8SoXXcD0RxmseC2kHqZ3hOBZR_c',
+          serviceWorkerRegistration: window._swReg,
+        }).then(token => {
+          if (token) {
+            console.log('FCM 토큰:', token);
+            // 토큰을 Firestore에 저장 (서버에서 알림 발송 시 사용)
+            if (currentUser && window._docRef) {
+              const tokenKey = currentUser.role === 'trainer'
+                ? 'trainerToken'
+                : 'memberToken_' + currentUser.memberId;
+              window._docRef.collection('tokens').doc(tokenKey).set({
+                token, updatedAt: new Date().toISOString()
+              }).catch(e => console.warn('토큰 저장 실패:', e));
+            }
+          }
+        }).catch(e => console.warn('FCM 토큰 실패:', e));
+      }
+      const btn = document.getElementById('notifBtn');
+      if (btn) btn.textContent = '🔔 ON';
       scheduleReminders();
     } else {
       showToast('알림이 거부되었습니다. 브라우저 설정에서 허용해주세요.', 'error');
@@ -2845,7 +2896,8 @@ const _fbStatusTimer = setInterval(() => {
   const badge = document.getElementById('fbStatus');
   if (!badge) return;
   if (window._fbReady) {
-    badge.textContent = '🔴 실시간 연결됨';
+    badge.textContent = '🔴';
+    badge.title = '실시간 연결됨';
     badge.style.background = 'rgba(79,255,176,.1)';
     badge.style.borderColor = 'rgba(79,255,176,.3)';
     badge.style.color = 'var(--member)';
