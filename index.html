@@ -1358,7 +1358,7 @@ function renderWeekView(ds) {
     bodyRows += `<div class="week-time-label">${h}:00</div>`;
     weekDates.forEach(wd => {
       const wSlots = getEffectiveSlots(wd);
-      const wRes   = data.reservations.filter(r=>r.date===wd && r.status==='confirmed' || r.date===wd && r.status==='pending');
+      const wRes   = data.reservations.filter(r=>r.date===wd && (r.status==='confirmed' || r.status==='pending'));
       const slot   = wSlots.find(s=>s.hour===h);
 
       let cellInner = '';
