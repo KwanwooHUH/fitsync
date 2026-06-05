@@ -69,17 +69,45 @@
   }, 8000);
 
   DOC_REF.onSnapshot(snap => {
-    const applyAndRender = (d) => {
+    const normalizeData = (d) => {
+        // Firestore 저장/로드 시 숫자가 문자열로 바뀌는 문제 완전 해결
+        // 모든 숫자 필드를 로드 시점에 일괄 정규화
+        return {
+          members: (d.members||[]).map(m=>({
+            ...m, id:+m.id, totalPt:+m.totalPt, usedPt:+m.usedPt
+          })),
+          trainerSlots: (d.trainerSlots||[]).map(s=>({
+            ...s, hour:+s.hour
+          })),
+          reservations: (d.reservations||[]).map(r=>({
+            ...r, id:+r.id,
+            memberId: r.memberId!=null ? +r.memberId : null,
+            hour:+r.hour
+          })),
+          workoutLogs:    d.workoutLogs    || [],
+          conditionLogs:  d.conditionLogs  || [],
+          changeRequests: (d.changeRequests||[]).map(c=>({
+            ...c, id:+c.id, resId:+c.resId,
+            memberId: c.memberId!=null ? +c.memberId : null,
+            reqHour: c.reqHour!=null ? +c.reqHour : null
+          })),
+          settings: d.settings || {},
+        };
+      };
+
+      const applyAndRender = (d) => {
+      const nd = normalizeData(d);
       if (window.data) {
-        window.data.members        = d.members        || [];
-        window.data.trainerSlots   = d.trainerSlots   || [];
-        window.data.reservations   = d.reservations   || [];
-        window.data.workoutLogs    = d.workoutLogs    || [];
-        window.data.conditionLogs  = d.conditionLogs  || [];
-        window.data.changeRequests = d.changeRequests || [];
+        window.data.members        = nd.members;
+        window.data.trainerSlots   = nd.trainerSlots;
+        window.data.reservations   = nd.reservations;
+        window.data.workoutLogs    = nd.workoutLogs;
+        window.data.conditionLogs  = nd.conditionLogs;
+        window.data.changeRequests = nd.changeRequests;
+        window.data.settings       = nd.settings;
       }
-      window.rid         = ((d.reservations  ||[]).reduce((mx,r)=>Math.max(mx,r.id||0),0)) + 1;
-      window.changeReqId = ((d.changeRequests||[]).reduce((mx,c)=>Math.max(mx,c.id||0),0)) + 1;
+      window.rid         = (nd.reservations.reduce((mx,r)=>Math.max(mx,r.id||0),0)) + 1;
+      window.changeReqId = (nd.changeRequests.reduce((mx,c)=>Math.max(mx,c.id||0),0)) + 1;
       window._fbReady = true;
       // renderAll이 준비될 때까지 대기
       const tryRender = () => {
