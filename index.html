@@ -719,7 +719,7 @@
     display:flex; flex-direction:column; gap:2px;
   }
   .week-cell:hover { background:var(--surface2); }
-  .week-cell.blocked-cell { background:repeating-linear-gradient(45deg,transparent,transparent 4px,rgba(255,255,255,.015) 4px,rgba(255,255,255,.015) 8px); cursor:default; }
+  .week-cell.blocked-cell { background:repeating-linear-gradient(45deg,transparent,transparent 4px,rgba(255,255,255,.015) 4px,rgba(255,255,255,.015) 8px); cursor:default; pointer-events:none; }
   .week-cell.blocked-cell:hover { background:repeating-linear-gradient(45deg,transparent,transparent 4px,rgba(255,255,255,.015) 4px,rgba(255,255,255,.015) 8px); }
 
   .week-event {
@@ -970,10 +970,7 @@ const SEED_DATA = {
     { id:3, name:'박지호', totalPt:10, usedPt:9,  color:'#ffb84f' },
     { id:4, name:'최유나', totalPt:40, usedPt:15, color:'#ff7eb8' },
   ],
-  trainerSlots: [
-    ...[10,11,14,15,16,17,19,20].map(h=>({date:today,   hour:h, open:true})),
-    ...[10,11,14,15,16,19,20   ].map(h=>({date:tomorrow, hour:h, open:true})),
-  ],
+  trainerSlots: [],
   reservations: [
     {id:1, memberId:1, date:today,    hour:10, status:'confirmed'},
     {id:2, memberId:2, date:today,    hour:14, status:'confirmed'},
@@ -1360,7 +1357,7 @@ function renderWeekView(ds) {
     weekDates.forEach(wd => {
       const wSlots = getEffectiveSlots(wd);
       const wRes   = data.reservations.filter(r=>r.date===wd && (r.status==='confirmed' || r.status==='pending'));
-      const slot   = wSlots.find(s=>s.hour===h);
+      const slot   = wSlots.find(s=>+s.hour===+h);
 
       let cellInner = '';
       let cellClass = '';
@@ -1684,7 +1681,7 @@ function isWeekday(dateStr) {
 
 // 해당 날짜의 유효 슬롯 반환 (주중 고정 + 수동 추가 병합)
 function getEffectiveSlots(dateStr) {
-  const manual = data.trainerSlots.filter(s=>s.date===dateStr);
+  const manual = data.trainerSlots.filter(s=>s.date===dateStr).map(s=>({...s, hour:+s.hour}));
   // dateOverrides: 특정 날짜에 덮어쓴 시간이 있으면 우선 사용
   const overrides = data.settings?.dateOverrides || {};
   if (overrides[dateStr] !== undefined) {
