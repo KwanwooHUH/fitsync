@@ -1022,7 +1022,15 @@ function saveData(immediate) {
   clearTimeout(_saveTimer);
   const doSave = () => {
     if (!window._fbSave) return;
-    const payload = JSON.parse(JSON.stringify(data));
+    // 저장 전 숫자 타입 정규화 (Firestore 저장 후 재로드 시 타입 일관성 보장)
+    const raw = JSON.parse(JSON.stringify(data));
+    const payload = {
+      ...raw,
+      members:        (raw.members||[]).map(m=>({...m, id:+m.id, totalPt:+m.totalPt, usedPt:+m.usedPt})),
+      trainerSlots:   (raw.trainerSlots||[]).map(s=>({...s, hour:+s.hour})),
+      reservations:   (raw.reservations||[]).map(r=>({...r, id:+r.id, memberId:r.memberId!=null?+r.memberId:null, hour:+r.hour})),
+      changeRequests: (raw.changeRequests||[]).map(c=>({...c, id:+c.id, resId:+c.resId, memberId:c.memberId!=null?+c.memberId:null, reqHour:c.reqHour!=null?+c.reqHour:null})),
+    };
     window._lastSaveJson = JSON.stringify(payload);
     window._fbSave(payload);
   };
@@ -1574,7 +1582,7 @@ function submitChangeRequest(resId) {
   data.changeRequests = data.changeRequests.filter(c=>!(+c.resId===+resId&&c.status==='pending'));
   data.changeRequests.push({
     id: +changeReqId++, resId: +resId, memberId: +r.memberId,
-    reqDate, reqHour, status:'pending',
+    reqDate, reqHour: +reqHour, status:'pending',
     requestedBy: state.role,
   });
   _closeModal();
@@ -2518,13 +2526,13 @@ function addResManual(date, hour) {
     const memberId = +document.getElementById('resMemSel').value;
     const m = getMember(memberId);
     if(!m){ showToast('회원을 선택해주세요.','error'); return; }
-    data.reservations.push({id:rid++, memberId, date, hour, status:'confirmed', type:'pt', memo});
+    data.reservations.push({id:+rid++, memberId:+memberId, date, hour:+hour, status:'confirmed', type:'pt', memo});
     _closeModal(); showToast(`${m.name} 님 PT 예약이 추가되었습니다.`,'success'); renderAll();
   } else {
     const guestName  = (document.getElementById('resGuestName')?.value||'').trim();
     const guestPhone = (document.getElementById('resGuestPhone')?.value||'').trim();
     if(!guestName){ showToast('이름을 입력해주세요.','error'); return; }
-    data.reservations.push({id:rid++, memberId:null, date, hour, status:'confirmed',
+    data.reservations.push({id:+rid++, memberId:null, date, hour:+hour, status:'confirmed',
       type, guestName, guestPhone, memo});
     const typeLabel = type==='consult'?'상담':'체험';
     _closeModal(); showToast(`${guestName} 님 ${typeLabel} 일정이 추가되었습니다.`,'success'); renderAll();
@@ -2566,7 +2574,7 @@ function bookSlot(date, hour) {
   // 내가 이미 이 시간에 신청/확정된 예약이 있으면 중복 방지
   const myExist = data.reservations.find(r=>r.date===date&&+r.hour===+hour&&+r.memberId===+myId&&r.status!=='cancelled');
   if(myExist){ showToast('이미 신청한 시간입니다.','info'); return; }
-  data.reservations.push({id:rid++, memberId:myId, date, hour, status:'pending', type:'pt'});
+  data.reservations.push({id:+rid++, memberId:+myId, date, hour:+hour, status:'pending', type:'pt'});
   _closeModal();
   showToast('예약이 신청되었습니다! 트레이너 확인 후 확정됩니다.','success');
   renderAll();
@@ -2596,7 +2604,7 @@ function requestWaitlist(date, hour) {
 
 function confirmWaitlist(date, hour) {
   const myId = state.selectedMember||data.members[0]?.id;
-  data.reservations.push({id:rid++, memberId:myId, date, hour, status:'pending', type:'pt', isWaitlist:true});
+  data.reservations.push({id:+rid++, memberId:+myId, date, hour:+hour, status:'pending', type:'pt', isWaitlist:true});
   _closeModal();
   showToast('대기 신청이 완료되었습니다. 트레이너 확인 후 알려드릴게요!','success');
   renderAll();
