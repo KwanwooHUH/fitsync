@@ -2,6 +2,7 @@
 <html lang="ko">
 <head>
 <meta charset="UTF-8">
+<meta name="version" content="2.0.6">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -1396,8 +1397,8 @@ function renderWeekView(ds) {
       } else {
         // 로그인한 회원의 ID를 currentUser에서 직접 가져옴
         const loginId  = currentUser?.memberId ?? myId;
-        const myRes    = wRes.find(r=>r.hour===h && +r.memberId===+loginId && r.status!=='cancelled');
-        const otherRes = wRes.find(r=>r.hour===h && +r.memberId!==+loginId && r.memberId!=null && r.status!=='cancelled');
+        const myRes    = wRes.find(r=>+r.hour===+h && +r.memberId===+loginId && r.status!=='cancelled');
+        const otherRes = wRes.find(r=>+r.hour===+h && +r.memberId!==+loginId && r.memberId!=null && r.status!=='cancelled');
         if(myRes) {
           const sc  = myRes.status;
           const chg = data.changeRequests.some(c=>+c.resId===+myRes.id&&c.status==='pending');
@@ -1412,7 +1413,7 @@ function renderWeekView(ds) {
           </div>`;
         } else if(otherRes) {
           // 내가 이미 대기 신청했는지 확인
-          const myWait = wRes.find(r=>r.hour===h && +r.memberId===+loginId && r.status==='pending');
+          const myWait = wRes.find(r=>+r.hour===+h && +r.memberId===+loginId && r.status==='pending');
           if(myWait) {
             cellInner = `<div class="week-event pending" onclick="openResDetail(${+myWait.id})">
               <span style="color:var(--trainer);font-weight:700">대기 중</span>
@@ -1501,7 +1502,7 @@ function openChangeModal(resId) {
 
   // 초기 날짜의 빈 슬롯
   const initSlots  = data.trainerSlots.filter(s=>s.date===r.date);
-  const hourOpts   = initSlots.map(s=>`<option value="${s.hour}" ${s.hour===r.hour?'selected':''}>${s.hour}:00</option>`).join('');
+  const hourOpts   = initSlots.map(s=>`<option value="${s.hour}" ${+s.hour===+r.hour?'selected':''}>${s.hour}:00</option>`).join('');
 
   openModal('🔄 일정 변경 신청', `
     <p style="font-size:13px;color:var(--text-muted);margin-bottom:18px">
@@ -1538,7 +1539,7 @@ function submitChangeRequest(resId) {
   const reqDate = document.getElementById('chgDate').value;
   const reqHour = +document.getElementById('chgHour').value;
 
-  if(reqDate===r.date && reqHour===r.hour) {
+  if(reqDate===r.date && +reqHour===+r.hour) {
     showToast('현재와 동일한 일정입니다.','error'); return;
   }
   const conflict = data.reservations.find(rv=>rv.date===reqDate&&rv.hour===reqHour&&rv.status!=='cancelled'&&rv.id!==resId);
@@ -2485,7 +2486,7 @@ function toggleResTypeFields() {
 function addResManual(date, hour) {
   const type   = document.getElementById('resTypeSel')?.value || 'pt';
   const memo   = (document.getElementById('resMemo')?.value||'').trim();
-  const conflict = data.reservations.find(r=>r.date===date&&r.hour===hour&&r.status!=='cancelled');
+  const conflict = data.reservations.find(r=>r.date===date&&+r.hour===+hour&&r.status!=='cancelled');
   if(conflict){ showToast('해당 시간에 이미 예약이 있습니다.','error'); return; }
 
   if(type === 'pt') {
@@ -2538,7 +2539,7 @@ function bookSlot(date, hour) {
   if(!m) return;
   if(getRemainingPt(myId)<=0){ showToast('PT 횟수가 부족합니다.','error'); return; }
   // 내가 이미 이 시간에 신청/확정된 예약이 있으면 중복 방지
-  const myExist = data.reservations.find(r=>r.date===date&&r.hour===hour&&+r.memberId===+myId&&r.status!=='cancelled');
+  const myExist = data.reservations.find(r=>r.date===date&&+r.hour===+hour&&+r.memberId===+myId&&r.status!=='cancelled');
   if(myExist){ showToast('이미 신청한 시간입니다.','info'); return; }
   data.reservations.push({id:rid++, memberId:myId, date, hour, status:'pending', type:'pt'});
   _closeModal();
@@ -2551,7 +2552,7 @@ function requestWaitlist(date, hour) {
   const m    = getMember(myId);
   if(!m) return;
   if(getRemainingPt(myId)<=0){ showToast('PT 횟수가 부족합니다.','error'); return; }
-  const myExist = data.reservations.find(r=>r.date===date&&r.hour===hour&&+r.memberId===+myId&&r.status!=='cancelled');
+  const myExist = data.reservations.find(r=>r.date===date&&+r.hour===+hour&&+r.memberId===+myId&&r.status!=='cancelled');
   if(myExist){ showToast('이미 신청한 시간입니다.','info'); return; }
   // 대기 신청 확인 모달
   openModal('⏳ 대기 신청', `
@@ -2873,7 +2874,7 @@ function completeRes(resId) {
   if(!r) return;
   const m = getMember(r.memberId);
   if(!m) return;
-  if(r.completed) { showToast('이미 이용완료 처리되었습니다.','info'); return; }
+  if(r.completed) { showToast('이미 이용완료 처리되었습니다.','info'); _closeModal(); return; }
   r.completed = true;
   if(m) {
     m.usedPt = Math.min(m.totalPt, m.usedPt + 1);
@@ -3134,6 +3135,19 @@ function testNotification() {
   showToast('테스트 알림을 보냈습니다!', 'success');
 }
 
+
+// ── 서비스 워커 캐시 강제 초기화 ──
+if ('serviceWorker' in navigator) {
+  navigator.serviceWorker.getRegistrations().then(regs => {
+    regs.forEach(reg => reg.update());
+  });
+  // 이전 캐시 삭제
+  if ('caches' in window) {
+    caches.keys().then(keys => {
+      keys.filter(k => k !== 'fitsync-v2').forEach(k => caches.delete(k));
+    });
+  }
+}
 // ── INIT ──
 // Firebase 연결 상태 배지 업데이트
 const _fbStatusTimer = setInterval(() => {
