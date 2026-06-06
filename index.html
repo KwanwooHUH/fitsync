@@ -3198,67 +3198,63 @@ window.runDiagnostic = function() {
   const memberMap = {};
   data.members.forEach(m => { memberMap[+m.id] = m.name; });
 
-  // 주간 뷰에서 실제로 어떤 예약이 어떤 셀에 표시되는지 계산
-  const ds = fmt(state.selectedDate);
-  const weekDates = getWeekDates(ds);
-  const hours = Array.from({length:14},(_,i)=>i+10);
-
-  const rows = [];
-
-  weekDates.forEach(wd => {
-    const wRes = data.reservations.filter(r =>
-      String(r.date) === String(wd) &&
-      (r.status === 'confirmed' || r.status === 'pending')
-    );
-
-    hours.forEach(h => {
-      const resList = wRes.filter(r => +r.hour === +h);
-      resList.forEach(res => {
-        const memberName = res.memberId ? (memberMap[+res.memberId] || `❌없음(id:${res.memberId})`) : (res.guestName || '비회원');
-        const typeCheck  = res.memberId && !memberMap[+res.memberId] ? '❌' : '✅';
-        rows.push({
-          date: wd, hour: h, id: res.id,
-          memberName, typeCheck,
-          raw: `id:${res.id} mid:${res.memberId}(${typeof res.memberId}) h:${res.hour}(${typeof res.hour}) d:${res.date}(${typeof res.date})`
-        });
-      });
-    });
+  // 전체 예약 데이터 표시 (날짜 오름차순 정렬)
+  const sorted = [...data.reservations].sort((a,b) => {
+    const dc = String(a.date).localeCompare(String(b.date));
+    return dc !== 0 ? dc : +a.hour - +b.hour;
   });
 
-  if (!rows.length) {
-    openModal('🔍 진단 결과', `<p style="color:var(--text-muted);text-align:center;padding:20px">이번 주 예약 없음</p><div class="modal-actions"><button class="btn btn-primary" onclick="_closeModal()">닫기</button></div>`);
+  if (!sorted.length) {
+    openModal('🔍 진단', `<p style="color:var(--text-muted);text-align:center;padding:20px">예약 없음</p>
+      <div class="modal-actions"><button class="btn btn-primary" onclick="_closeModal()">닫기</button></div>`);
     return;
   }
 
-  // 실제 데이터 전체 dump도 표시
-  const allRes = data.reservations.map(r =>
-    `<div style="font-size:10px;padding:3px 6px;background:var(--bg);border-radius:4px;margin-bottom:2px;font-family:monospace;color:var(--text-muted)">
-      id:<b style="color:var(--text)">${r.id}</b>
-      mid:<b style="color:${r.memberId?'var(--accent3)':'var(--warning)'}">${r.memberId}</b>
-      (${typeof r.memberId})
-      date:<b style="color:var(--text)">${r.date}</b>
-      h:<b style="color:var(--accent)">${r.hour}</b>
-      (${typeof r.hour})
-      → <b style="color:${r.memberId&&memberMap[+r.memberId]?'var(--member)':'var(--danger)'}">${r.memberId ? (memberMap[+r.memberId]||'❌없음') : (r.guestName||'비회원')}</b>
-    </div>`
-  ).join('');
+  const rows = sorted.map(r => {
+    const mid        = r.memberId != null ? +r.memberId : null;
+    const foundName  = mid != null ? (memberMap[mid] || null) : null;
+    const displayName = mid != null
+      ? (foundName ? foundName : `❌ id:${r.memberId} 없음`)
+      : (r.guestName || '비회원');
+    const hasError   = mid != null && !foundName;
+    const typeError  = typeof r.hour === 'string' || (r.memberId != null && typeof r.memberId === 'string');
+
+    return `<div style="display:grid;grid-template-columns:90px 40px 120px 1fr;gap:6px;align-items:center;
+        padding:5px 8px;border-radius:6px;margin-bottom:3px;font-size:11px;
+        background:${hasError?'rgba(255,79,123,.1)':typeError?'rgba(255,184,79,.08)':'var(--bg)'}">
+      <span style="color:var(--text-muted)">${r.date}</span>
+      <span style="color:var(--accent);font-weight:700">${r.hour}:00</span>
+      <span style="color:${hasError?'var(--danger)':typeError?'#ffb84f':'var(--member)'};font-weight:600">
+        ${hasError?'❌ ':typeError?'⚠️ ':''}${displayName}
+      </span>
+      <span style="color:var(--text-dim);font-size:10px;font-family:monospace">
+        id:${r.id} mid:${r.memberId}(${typeof r.memberId}) h:${r.hour}(${typeof r.hour})
+      </span>
+    </div>`;
+  }).join('');
+
+  const errorCount = sorted.filter(r => {
+    const mid = r.memberId != null ? +r.memberId : null;
+    return (mid != null && !memberMap[mid]) ||
+           typeof r.hour === 'string' ||
+           (r.memberId != null && typeof r.memberId === 'string');
+  }).length;
 
   openModal('🔍 전체 예약 데이터', `
-    <div style="margin-bottom:12px;font-size:12px;color:var(--text-muted)">
-      총 ${data.reservations.length}건 — 여기서 잘못된 memberId를 찾아주세요
+    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
+      <span style="font-size:12px;color:var(--text-muted)">총 ${sorted.length}건
+        ${errorCount > 0 ? `· <span style="color:var(--danger)">❌ ${errorCount}건 오류</span>` : '· <span style="color:var(--member)">✅ 정상</span>'}
+      </span>
     </div>
-    <div style="max-height:400px;overflow-y:auto">${allRes}</div>
+    <div style="max-height:420px;overflow-y:auto">${rows}</div>
     <div class="modal-actions" style="margin-top:12px">
-      <button class="btn btn-danger btn-sm" onclick="fixAllTypes()">🔧 타입 강제 수정</button>
+      <button class="btn btn-danger btn-sm" onclick="fixAllTypes()">🔧 전체 타입 수정</button>
       <button class="btn btn-primary" onclick="_closeModal()">닫기</button>
     </div>
   `);
 };
 
 window.fixAllTypes = function() {
-  // 모든 예약의 숫자 필드를 강제로 숫자 변환 후 저장
-  const memberIds = new Set(data.members.map(m => +m.id));
-
   data.reservations = data.reservations.map(r => ({
     ...r,
     id:       +r.id,
@@ -3266,33 +3262,23 @@ window.fixAllTypes = function() {
     date:     String(r.date),
     memberId: r.memberId != null ? +r.memberId : null,
   }));
-
   data.members = data.members.map(m => ({
-    ...m,
-    id:      +m.id,
-    totalPt: +m.totalPt,
-    usedPt:  +m.usedPt,
+    ...m, id:+m.id, totalPt:+m.totalPt, usedPt:+m.usedPt,
   }));
-
   data.trainerSlots = data.trainerSlots.map(s => ({
-    ...s,
-    hour: +s.hour,
-    date: String(s.date),
+    ...s, hour:+s.hour, date:String(s.date),
   }));
-
   data.changeRequests = data.changeRequests.map(c => ({
     ...c,
-    id:       +c.id,
-    resId:    +c.resId,
-    memberId: c.memberId != null ? +c.memberId : null,
-    reqHour:  c.reqHour  != null ? +c.reqHour  : null,
-    reqDate:  c.reqDate  ? String(c.reqDate) : c.reqDate,
+    id:+c.id, resId:+c.resId,
+    memberId: c.memberId!=null?+c.memberId:null,
+    reqHour:  c.reqHour !=null?+c.reqHour :null,
+    reqDate:  c.reqDate ?String(c.reqDate):c.reqDate,
   }));
-
   _closeModal();
   saveData(true);
-  showToast('전체 타입 수정 완료! Firestore에 저장됩니다.', 'success');
-  setTimeout(() => renderAll(), 500);
+  showToast('타입 수정 완료! Firestore에 저장됩니다.', 'success');
+  setTimeout(() => renderAll(), 800);
 };
 
 // ── INIT ──
