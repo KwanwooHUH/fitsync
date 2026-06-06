@@ -1393,7 +1393,7 @@ function renderWeekView(ds) {
     bodyRows += `<div class="week-time-label">${h}:00</div>`;
     weekDates.forEach(wd => {
       const wSlots = getEffectiveSlots(wd);
-      const wRes   = data.reservations.filter(r=>r.date===wd && (r.status==='confirmed' || r.status==='pending'));
+      const wRes   = data.reservations.filter(r=>String(r.date)===String(wd) && (r.status==='confirmed' || r.status==='pending'));
       const slot   = wSlots.find(s=>+s.hour===+h);
 
       let cellInner = '';
@@ -1686,7 +1686,7 @@ function applyLogin() {
     document.getElementById('loginUserBadge').textContent = '🏋️ 트레이너';
     // 진단 버튼 표시
     const diagBtn = document.getElementById('diagBtn');
-    if (diagBtn) diagBtn.style.display = '';
+    if (diagBtn) diagBtn.style.display = 'inline-flex';
   } else {
     state.role = 'member';
     state.selectedMember = currentUser.memberId;
@@ -2532,13 +2532,13 @@ function addResManual(date, hour) {
     const memberId = +document.getElementById('resMemSel').value;
     const m = getMember(memberId);
     if(!m){ showToast('회원을 선택해주세요.','error'); return; }
-    data.reservations.push({id:+rid++, memberId:+memberId, date, hour:+hour, status:'confirmed', type:'pt', memo});
+    data.reservations.push({id:+rid++, memberId:+memberId, date:String(date), hour:+hour, status:'confirmed', type:'pt', memo});
     _closeModal(); showToast(`${m.name} 님 PT 예약이 추가되었습니다.`,'success'); renderAll();
   } else {
     const guestName  = (document.getElementById('resGuestName')?.value||'').trim();
     const guestPhone = (document.getElementById('resGuestPhone')?.value||'').trim();
     if(!guestName){ showToast('이름을 입력해주세요.','error'); return; }
-    data.reservations.push({id:+rid++, memberId:null, date, hour:+hour, status:'confirmed',
+    data.reservations.push({id:+rid++, memberId:null, date:String(date), hour:+hour, status:'confirmed',
       type, guestName, guestPhone, memo});
     const typeLabel = type==='consult'?'상담':'체험';
     _closeModal(); showToast(`${guestName} 님 ${typeLabel} 일정이 추가되었습니다.`,'success'); renderAll();
@@ -2580,7 +2580,7 @@ function bookSlot(date, hour) {
   // 내가 이미 이 시간에 신청/확정된 예약이 있으면 중복 방지
   const myExist = data.reservations.find(r=>r.date===date&&+r.hour===+hour&&+r.memberId===+myId&&r.status!=='cancelled');
   if(myExist){ showToast('이미 신청한 시간입니다.','info'); return; }
-  data.reservations.push({id:+rid++, memberId:+myId, date, hour:+hour, status:'pending', type:'pt'});
+  data.reservations.push({id:+rid++, memberId:+myId, date:String(date), hour:+hour, status:'pending', type:'pt'});
   _closeModal();
   showToast('예약이 신청되었습니다! 트레이너 확인 후 확정됩니다.','success');
   renderAll();
@@ -2610,7 +2610,7 @@ function requestWaitlist(date, hour) {
 
 function confirmWaitlist(date, hour) {
   const myId = state.selectedMember||data.members[0]?.id;
-  data.reservations.push({id:+rid++, memberId:+myId, date, hour:+hour, status:'pending', type:'pt', isWaitlist:true});
+  data.reservations.push({id:+rid++, memberId:+myId, date:String(date), hour:+hour, status:'pending', type:'pt', isWaitlist:true});
   _closeModal();
   showToast('대기 신청이 완료되었습니다. 트레이너 확인 후 알려드릴게요!','success');
   renderAll();
@@ -2967,6 +2967,9 @@ function renderAll() {
   window.data = data;
   window.rid  = rid;
   window.changeReqId = changeReqId;
+  // 진단 버튼: 트레이너만 표시
+  const diagBtn = document.getElementById('diagBtn');
+  if (diagBtn) diagBtn.style.display = currentUser.role==='trainer' ? 'inline-flex' : 'none';
   saveData();
   renderCal();
   renderSidebarMembers();
