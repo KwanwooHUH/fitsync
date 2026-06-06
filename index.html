@@ -1336,10 +1336,10 @@ function renderScheduleTab(ds, daySlots, dayRes) {
           <div style="font-size:12px;color:var(--text-muted)">${r.hour}:00${r.guestPhone?' · '+r.guestPhone:''}${r.memo?' · '+r.memo:''}</div>
         </div>
         <div style="display:flex;gap:6px;flex-shrink:0">
-          ${!r.completed?`<button class="btn btn-sm" style="background:rgba(79,255,176,.12);color:var(--member);border:1px solid rgba(79,255,176,.25)" onclick="completeRes(${+r.id})">✅ 완료</button>`
+          ${!r.completed?`<button class="btn btn-sm" style="background:rgba(79,255,176,.12);color:var(--member);border:1px solid rgba(79,255,176,.25)" data-resid="${String(r.id)}" onclick="completeRes(this.dataset.resid)">✅ 완료</button>`
             :`<span style="font-size:12px;color:var(--member);font-weight:600">✅ 완료</span>`}
-          <button class="btn btn-sm btn-secondary" onclick="openResDetail(${+r.id})">상세</button>
-          ${!r.completed?`<button class="btn btn-sm btn-danger" onclick="cancelRes(${+r.id})">취소</button>`:''}
+          <button class="btn btn-sm btn-secondary" data-resid="${String(r.id)}" onclick="openResDetail(this.dataset.resid)">상세</button>
+          ${!r.completed?`<button class="btn btn-sm btn-danger" data-resid="${String(r.id)}" onclick="cancelRes(this.dataset.resid)">취소</button>`:''}
         </div>
       </div>`;
     }).join('');
@@ -1402,7 +1402,6 @@ function renderWeekView(ds) {
       if(state.role==='trainer') {
         const resList = wRes.filter(r=>+r.hour===+h);
         if(resList.length) {
-          // 같은 시간에 여러 예약이 있을 수 있음 (대기 포함) — 모두 표시
           cellInner = resList.map(res => {
             const m   = getMember(+res.memberId);
             const sc  = res.status;
@@ -1415,9 +1414,11 @@ function renderWeekView(ds) {
             const displayName = isGuest ? (res.guestName||'방문자') : (m?.name||'?');
             const statusIcon  = res.completed?'✔':chg?'🔄':sc==='confirmed'?'✅':'⏳';
             const typeIcon    = resType==='consult'?'💬':resType==='trial'?'⭐':'';
-            // onclick을 이벤트 블록 자체에만 — event.stopPropagation으로 버블링 차단
+            // data-resid 속성으로 id 전달 — 템플릿 리터럴 클로저 문제 완전 회피
+            const resIdStr = String(res.id);
             return `<div class="week-event ${sc}${chg?' change-pending':''}"
-              onclick="event.stopPropagation();openResDetail(${+res.id})"
+              data-resid="${resIdStr}"
+              onclick="event.stopPropagation();openResDetail(this.dataset.resid)"
               style="background:${memberColor}22;border-left:3px solid ${memberColor}">
               <span style="color:${memberColor};font-weight:700;font-size:10px;overflow:hidden;text-overflow:ellipsis">${typeIcon}${displayName}</span>
               <span style="font-size:9px;opacity:.8;flex-shrink:0">${statusIcon}</span>
@@ -1439,8 +1440,10 @@ function renderWeekView(ds) {
           const myM   = getMember(myRes.memberId);
           const myCol = myM?.color || 'var(--member)';
           const myIcon = myRes.completed?'✔':chg?'🔄':sc==='confirmed'?'✅':'⏳';
+          const myResIdStr = String(myRes.id);
           cellInner = `<div class="week-event ${sc}${chg?' change-pending':''}"
-            onclick="event.stopPropagation();openResDetail(${+myRes.id})"
+            data-resid="${myResIdStr}"
+            onclick="event.stopPropagation();openResDetail(this.dataset.resid)"
             style="background:${myCol}22;border-left:3px solid ${myCol}">
             <span style="color:${myCol};font-weight:700;overflow:hidden;text-overflow:ellipsis">내 수업</span>
             <span style="font-size:9px;opacity:.8;flex-shrink:0">${myIcon}</span>
@@ -1492,7 +1495,7 @@ function renderListTab(ds) {
       </div>
       <span class="res-status ${r.status}">${r.status==='confirmed'?'확정':r.isWaitlist?'⏳ 대기신청':'대기'}</span>
       ${state.role==='trainer'&&r.status==='pending'?`<button class="btn btn-sm btn-primary" onclick="confirmRes(${r.id})">확정</button>`:''}
-      ${state.role==='trainer'&&pc2?`<button class="btn btn-sm" style="background:rgba(167,139,250,.15);color:#a78bfa;border:1px solid rgba(167,139,250,.3)" onclick="openResDetail(${+r.id})">변경 검토</button>`:''}
+      ${state.role==='trainer'&&pc2?`<button class="btn btn-sm" style="background:rgba(167,139,250,.15);color:#a78bfa;border:1px solid rgba(167,139,250,.3)" data-resid="${String(r.id)}" onclick="openResDetail(this.dataset.resid)">변경 검토</button>`:''}
       ${r.status!=='cancelled'&&!pc2?`<button class="btn btn-sm btn-danger" onclick="cancelRes(${r.id})">취소</button>`:''}
     </div>`;
   }).join('');
@@ -2618,7 +2621,8 @@ function confirmWaitlist(date, hour) {
 
 // Reservation detail
 function openResDetail(resId) {
-  const r = data.reservations.find(x=>+x.id===+resId);
+  const _resId = typeof resId === 'object' ? resId.resid || resId : resId;
+  const r = data.reservations.find(x=>+x.id===+_resId);
   if(!r) { showToast('일정 정보를 찾을 수 없습니다.','error'); return; }
   const m  = r.memberId ? getMember(+r.memberId) : null;
   const sc = {confirmed:'✅ 확정', pending: r.isWaitlist?'⏳ 대기 신청':'⏳ 승인 대기', cancelled:'❌ 취소'};
