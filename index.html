@@ -2,7 +2,9 @@
 <html lang="ko">
 <head>
 <meta charset="UTF-8">
-<meta name="version" content="2.0.6">
+<meta name="version" content="2.1.0">
+<link rel="manifest" href="/fitsync/manifest.json">
+<meta name="theme-color" content="#0d0f14">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
@@ -1602,13 +1604,14 @@ function approveChange(changeId) {
   r.date   = c.reqDate;
   r.hour   = +c.reqHour;
   c.status = 'approved';
+  notifyChangeResult(c.memberId, true, c.reqDate, c.reqHour);
   showToast('일정 변경이 승인되었습니다.','success');
   renderAll();
 }
 
 function rejectChange(changeId) {
   const c = data.changeRequests.find(x=>+x.id===+changeId);
-  if(c) c.status = 'rejected';
+  if(c) { c.status = 'rejected'; notifyChangeResult(c.memberId, false, c.reqDate, c.reqHour); }
   showToast('변경 신청이 거절되었습니다.','info');
   renderAll();
 }
@@ -1677,11 +1680,15 @@ function applyLogin() {
   if(!currentUser) return;
   // 세션 저장 (새로고침 후 복원)
   try { sessionStorage.setItem('fitsync_user', JSON.stringify(currentUser)); } catch(e) {}
-  // 로그인 후 알림 버튼 상태 업데이트
+  // 로그인 후 알림 리스너 시작
   setTimeout(() => {
-    if (Notification.permission === 'granted') scheduleReminders();
+    if (Notification.permission === 'granted') {
+      scheduleReminders();
+      startNotificationListener();
+      if (window._myFcmToken) saveFcmToken(window._myFcmToken);
+    }
     const btn = document.getElementById('notifBtn');
-    if (btn) btn.textContent = Notification.permission === 'granted' ? '🔔 알림 ON' : '🔔 알림';
+    if (btn) btn.textContent = Notification.permission === 'granted' ? '🔔 ON' : '🔔';
   }, 500);
   if(currentUser.role === 'trainer') {
     state.role = 'trainer';
@@ -2586,6 +2593,7 @@ function bookSlot(date, hour) {
   data.reservations.push({id:+rid++, memberId:+myId, date:String(date), hour:+hour, status:'pending', type:'pt'});
   _closeModal();
   showToast('예약이 신청되었습니다! 트레이너 확인 후 확정됩니다.','success');
+  notifyTrainerNewRequest(myId, date, hour);
   renderAll();
 }
 
@@ -2932,12 +2940,16 @@ function completeRes(resId) {
 
 function confirmRes(id) {
   const r=data.reservations.find(x=>+x.id===+id);
-  if(r){r.status='confirmed';}
+  if(r){
+    r.status='confirmed';
+    notifyMemberConfirmed(r.memberId, r.date, r.hour);
+  }
   showToast('예약이 확정되었습니다.','success'); renderAll();
 }
 function cancelRes(id) {
+  const r = data.reservations.find(x=>+x.id===+id);
+  if(r && r.memberId) notifyMemberCancelled(r.memberId, r.date, r.hour);
   data.reservations = data.reservations.filter(x=>+x.id!==+id);
-  // 관련 변경신청도 삭제
   data.changeRequests = data.changeRequests.filter(c=>+c.resId!==+id);
   showToast('예약이 취소되었습니다.','info');
   saveData(true);
@@ -3046,6 +3058,7 @@ function requestNotificationPermission() {
   Notification.requestPermission().then(permission => {
     if (permission === 'granted') {
       showToast('알림이 허용되었습니다! 🔔', 'success');
+      startNotificationListener();
       // FCM 토큰 등록 (백그라운드 알림용)
       if (window._fcmMessaging) {
         // VAPID 키: Firebase Console > 프로젝트 설정 > 클라우드 메시징 > 웹 푸시 인증서
@@ -3193,6 +3206,123 @@ if ('serviceWorker' in navigator) {
       keys.filter(k => k !== 'fitsync-v2').forEach(k => caches.delete(k));
     });
   }
+}
+
+
+// ══════════════════════════════════════════
+//  FCM NOTIFICATION SYSTEM
+// ══════════════════════════════════════════
+
+function saveFcmToken(token) {
+  if (!currentUser || !window._docRef) return;
+  const tokenKey = currentUser.role === 'trainer'
+    ? 'trainer'
+    : 'member_' + currentUser.memberId;
+  window._docRef.collection('fcmTokens').doc(tokenKey).set({
+    token, role: currentUser.role,
+    memberId: currentUser.memberId || null,
+    updatedAt: new Date().toISOString()
+  }).catch(e => console.warn('토큰 저장 실패:', e));
+}
+
+// 브라우저 알림 직접 발송 (같은 기기)
+function notifyLocal(title, body, tag) {
+  if (Notification.permission !== 'granted') return;
+  const options = { body, tag: tag||'fitsync', icon: '/fitsync/icon-192.png', badge: '/fitsync/icon-192.png', vibrate: [200,100,200] };
+  if (window._swReg) {
+    window._swReg.showNotification(title, options);
+  } else {
+    new Notification(title, options);
+  }
+}
+
+// Firestore를 통한 알림 브로드캐스트
+// 다른 기기에서 읽어서 알림 표시
+function broadcastNotification(payload) {
+  if (!window._docRef) return;
+  window._docRef.collection('notifications').add({
+    ...payload,
+    createdAt: new Date().toISOString(),
+    read: false,
+  }).catch(e => console.warn('알림 저장 실패:', e));
+}
+
+// 알림 수신 리스너 (앱 열려 있을 때)
+let _notifListener = null;
+function startNotificationListener() {
+  if (_notifListener || !window._docRef || !currentUser) return;
+  const myKey = currentUser.role === 'trainer'
+    ? 'trainer'
+    : 'member_' + currentUser.memberId;
+
+  _notifListener = window._docRef.collection('notifications')
+    .where('to', '==', myKey)
+    .where('read', '==', false)
+    .onSnapshot(snap => {
+      snap.docChanges().forEach(change => {
+        if (change.type === 'added') {
+          const n = change.doc.data();
+          // 방금 생성된 것만 (5초 이내)
+          const age = Date.now() - new Date(n.createdAt).getTime();
+          if (age < 5000) {
+            notifyLocal(n.title, n.body, n.tag);
+            showToast(n.body, 'info');
+          }
+          // 읽음 처리
+          change.doc.ref.update({ read: true }).catch(()=>{});
+        }
+      });
+    });
+}
+
+// ── 예약 신청 시 트레이너에게 알림 ──
+function notifyTrainerNewRequest(memberId, date, hour) {
+  const m = getMember(+memberId);
+  if (!m) return;
+  broadcastNotification({
+    to: 'trainer',
+    title: '📬 새 예약 신청',
+    body: `${m.name}님이 ${fmtDisp(date)} ${hour}:00 수업을 신청했습니다.`,
+    tag: 'new-request-' + Date.now(),
+    type: 'new_request',
+  });
+}
+
+// ── 예약 확정 시 회원에게 알림 ──
+function notifyMemberConfirmed(memberId, date, hour) {
+  const m = getMember(+memberId);
+  if (!m) return;
+  broadcastNotification({
+    to: 'member_' + memberId,
+    title: '✅ 예약 확정',
+    body: `${fmtDisp(date)} ${hour}:00 PT 수업이 확정되었습니다!`,
+    tag: 'confirmed-' + Date.now(),
+    type: 'confirmed',
+  });
+}
+
+// ── 예약 취소 시 회원에게 알림 ──
+function notifyMemberCancelled(memberId, date, hour) {
+  broadcastNotification({
+    to: 'member_' + memberId,
+    title: '❌ 예약 취소',
+    body: `${fmtDisp(date)} ${hour}:00 수업 예약이 취소되었습니다.`,
+    tag: 'cancelled-' + Date.now(),
+    type: 'cancelled',
+  });
+}
+
+// ── 변경 승인/거절 시 회원에게 알림 ──
+function notifyChangeResult(memberId, approved, date, hour) {
+  broadcastNotification({
+    to: 'member_' + memberId,
+    title: approved ? '✅ 일정 변경 승인' : '❌ 일정 변경 거절',
+    body: approved
+      ? `${fmtDisp(date)} ${hour}:00 로 일정이 변경되었습니다.`
+      : `일정 변경 신청이 거절되었습니다.`,
+    tag: 'change-result-' + Date.now(),
+    type: 'change_result',
+  });
 }
 
 // ══════════════════════════════════════════
