@@ -2,18 +2,22 @@
 <html lang="ko">
 <head>
 <meta charset="UTF-8">
-<meta name="version" content="2.1.0">
+<meta name="version" content="3.0.0">
 <link rel="manifest" href="/fitsync/manifest.json">
 <meta name="theme-color" content="#0d0f14">
 <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
 <meta name="apple-mobile-web-app-capable" content="yes">
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
-<title>PT 스케줄 관리</title>
-<!-- Firebase SDK (compat, iOS Safari 호환) -->
+<title>PT 스케줄 관리 - FitSync Pro</title>
+
+<!-- Firebase SDK (compat, iOS Safari 호환 및 인증/스토어 지원) -->
 <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js" crossorigin="anonymous"></script>
 <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore-compat.js" crossorigin="anonymous"></script>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-auth-compat.js" crossorigin="anonymous"></script>
+
 <script>
 (function() {
+  // 기존 프로젝트의 Firebase 설정 유지
   const firebaseConfig = {
     apiKey:            "AIzaSyAmCrwZ1KToKdnHJky5OX3JyD88ZCrzTBE",
     authDomain:        "fitsync-9f15d.firebaseapp.com",
@@ -23,7 +27,13 @@
     appId:             "1:696294571061:web:1beecc54a3734aefc1857c"
   };
   firebase.initializeApp(firebaseConfig);
+  
   const db = firebase.firestore();
+  const auth = firebase.auth();
+  
+  window._db = db;
+  window._auth = auth;
+
   // iOS Safari 호환 설정
   try {
     const isIOS = /iPad|iPhone|iPod/.test(navigator.userAgent) ||
@@ -31,155 +41,221 @@
     if (isIOS) {
       db.settings({ experimentalForceLongPolling: true, merge: true });
     }
-  } catch(e) {}
-  // FCM 메시징 초기화 (HTTPS에서만 동작)
-  if (location.protocol === 'https:' && 'serviceWorker' in navigator) {
-    try {
-      const messaging = firebase.messaging();
-      // 포그라운드 메시지 수신
-      messaging.onMessage(payload => {
-        const { title, body } = payload.notification || {};
-        if (Notification.permission === 'granted') {
-          new Notification(title || 'FITSYNC', {
-            body:  body || '알림이 있습니다.',
-            icon:  '/fitsync/icon-192.png',
-          });
-        }
-      });
-      window._fcmMessaging = messaging;
-    } catch(e) { console.warn('FCM 초기화 실패:', e); }
-  }
-  const DOC_REF = db.collection('fitsync').doc('shared');
-  window._docRef  = DOC_REF;
+  } catch(e) { console.warn("iOS settings error:", e); }
+
+  // 글로벌 데이터 구조 선언
+  window.data = {
+    members: [],
+    trainerSlots: [],
+    reservations: [],
+    workoutLogs: [],
+    conditionLogs: [],
+    changeRequests: [],
+    settings: {}
+  };
+  window.state = {
+    role: 'member', // 'trainer' or 'member'
+    selectedMember: null,
+    selectedDate: new Date().toISOString().split('T')[0]
+  };
+  window.currentUser = null;
   window._fbReady = false;
 
-  // onSnapshot: 데이터 도착 시 앱에 반영
-  // iOS 대비: 8초 내 onSnapshot 미동작 시 강제 로그인 화면 진입
-  window._iosTimeout = setTimeout(() => {
-    if (!window._fbReady) {
+  // 각 컬렉션 로딩 상태 추적
+  const loadingStatus = {
+    members: false,
+    trainerSlots: false,
+    reservations: false,
+    workoutLogs: false,
+    conditionLogs: false,
+    changeRequests: false,
+    settings: false
+  };
+
+  function checkAllLoaded() {
+    if (Object.values(loadingStatus).every(status => status === true)) {
       window._fbReady = true;
-      const tryForceRender = () => {
-        if (typeof window.renderAll === 'function' && typeof window.showLoginScreen === 'function') {
-          const loader = document.getElementById('fbLoader');
-          if (loader) loader.innerHTML = '<div style="color:#ff4f7b;font-size:14px;text-align:center;padding:20px">⚠️ Firebase 연결 실패<br><small style="color:#6b7a99">네트워크를 확인하거나 새로고침 해주세요</small><br><br><button onclick="location.reload()" style="margin-top:12px;padding:10px 20px;background:var(--accent);border:none;border-radius:8px;color:#0d0f14;font-weight:700;cursor:pointer;font-size:14px">새로고침</button></div>';
-        } else {
-          setTimeout(tryForceRender, 100);
-        }
-      };
-      tryForceRender();
-    }
-  }, 8000);
-
-  DOC_REF.onSnapshot(snap => {
-    const normalizeData = (d) => {
-        // Firestore 저장/로드 시 숫자가 문자열로 바뀌는 문제 완전 해결
-        // 모든 숫자 필드를 로드 시점에 일괄 정규화
-        return {
-          members: (d.members||[]).map(m=>({
-            ...m, id:+m.id, totalPt:+m.totalPt, usedPt:+m.usedPt
-          })),
-          trainerSlots: (d.trainerSlots||[]).map(s=>({
-            ...s, hour:+s.hour
-          })),
-          reservations: (d.reservations||[]).map(r=>({
-            ...r, id:+r.id,
-            memberId: r.memberId!=null ? +r.memberId : null,
-            hour:+r.hour
-          })),
-          workoutLogs:    d.workoutLogs    || [],
-          conditionLogs:  d.conditionLogs  || [],
-          changeRequests: (d.changeRequests||[]).map(c=>({
-            ...c, id:+c.id, resId:+c.resId,
-            memberId: c.memberId!=null ? +c.memberId : null,
-            reqHour: c.reqHour!=null ? +c.reqHour : null
-          })),
-          settings: d.settings || {},
-        };
-      };
-
-      const applyAndRender = (d) => {
-      const nd = normalizeData(d);
-      if (window.data) {
-        window.data.members        = nd.members;
-        window.data.trainerSlots   = nd.trainerSlots;
-        window.data.reservations   = nd.reservations;
-        window.data.workoutLogs    = nd.workoutLogs;
-        window.data.conditionLogs  = nd.conditionLogs;
-        window.data.changeRequests = nd.changeRequests;
-        window.data.settings       = nd.settings;
+      const loader = document.getElementById('fbLoader');
+      if (loader) loader.style.display = 'none';
+      if (typeof window.renderAll === 'function') {
+        window.renderAll();
       }
-      window.rid         = (nd.reservations.reduce((mx,r)=>Math.max(mx,r.id||0),0)) + 1;
-      window.changeReqId = (nd.changeRequests.reduce((mx,c)=>Math.max(mx,c.id||0),0)) + 1;
-      window._fbReady = true;
-      // renderAll이 준비될 때까지 대기
-      const tryRender = () => {
-        if (typeof window.renderAll === 'function') {
-          // 세션에 저장된 로그인 정보 복원
-          try {
-            const saved = sessionStorage.getItem('fitsync_user');
-            if (saved && !window.currentUser) {
-              const u = JSON.parse(saved);
-              if (u.role === 'trainer' || (window.data.members||[]).find(m=>+m.id===+u.memberId)) {
-                window.currentUser = u;
-                if (u.role === 'trainer') {
-                  window.state.role = 'trainer';
-                  window.state.selectedMember = null;
-                  const badge = document.getElementById('loginUserBadge');
-                  if(badge) badge.textContent = '🏋️ 트레이너';
-                } else {
-                  window.state.role = 'member';
-                  window.state.selectedMember = u.memberId;
-                  const m = (window.data.members||[]).find(x=>+x.id===+u.memberId);
-                  const badge = document.getElementById('loginUserBadge');
-                  if(badge) badge.textContent = '👤 ' + (m?.name||'');
-                }
-              }
-            }
-          } catch(e) {}
-          clearTimeout(window._iosTimeout);
-          window.renderAll();
-          const loader = document.getElementById('fbLoader');
-          if (loader) loader.style.display = 'none';
-          if (!window.currentUser && typeof window.showLoginScreen === 'function') {
-            window.showLoginScreen();
-          }
-        } else {
-          setTimeout(tryRender, 50);
-        }
-      };
-      tryRender();
-    };
-
-    if (snap.exists && (typeof snap.exists === 'function' ? snap.exists() : snap.exists)) {
-      const remote = snap.data();
-      if (window._lastSaveJson && window._lastSaveJson === JSON.stringify(remote)) return;
-      applyAndRender(remote);
-    } else {
-      // 문서 없음 → SEED_DATA로 첫 저장
-      const seed = {
-        members: [], trainerSlots: [], reservations: [],
-        workoutLogs: [], conditionLogs: [], changeRequests: []
-      };
-      applyAndRender(seed);
-      DOC_REF.set(seed).catch(e => console.warn('Firestore init error:', e));
     }
-  }, err => {
-    console.error('Firestore error:', err);
-    clearTimeout(window._iosTimeout);
-    window._fbReady = true;
-    const loader = document.getElementById('fbLoader');
-    if (loader) {
-      loader.innerHTML = '<div style="color:#ff4f7b;font-size:14px;text-align:center;padding:20px">⚠️ Firebase 연결 실패<br><small style="color:#6b7a99">인터넷 연결을 확인해주세요</small><br><br><button onclick="location.reload()" style="margin-top:12px;padding:10px 20px;background:var(--accent);border:none;border-radius:8px;color:#0d0f14;font-weight:700;cursor:pointer;font-size:14px">새로고침</button></div>';
+  }
+
+  // ── 데이터 독립 컬렉션 분리 및 실시간 동기화 (Multi-Collection Listening) ──
+  db.collection('members').onSnapshot(snap => {
+    window.data.members = [];
+    snap.forEach(doc => {
+      const d = doc.data();
+      window.data.members.push({ ...d, id: +d.id, totalPt: +d.totalPt, usedPt: +d.usedPt });
+    });
+    loadingStatus.members = true;
+    checkAllLoaded();
+  }, err => console.error("Members sync error:", err));
+
+  db.collection('trainerSlots').onSnapshot(snap => {
+    window.data.trainerSlots = [];
+    snap.forEach(doc => {
+      const d = doc.data();
+      window.data.trainerSlots.push({ ...d, hour: +d.hour });
+    });
+    loadingStatus.trainerSlots = true;
+    checkAllLoaded();
+  }, err => console.error("Slots sync error:", err));
+
+  db.collection('reservations').onSnapshot(snap => {
+    window.data.reservations = [];
+    snap.forEach(doc => {
+      const d = doc.data();
+      window.data.reservations.push({
+        ...d, id: +d.id,
+        memberId: d.memberId != null ? +d.memberId : null,
+        hour: +d.hour
+      });
+    });
+    window.rid = (window.data.reservations.reduce((mx, r) => Math.max(mx, r.id || 0), 0)) + 1;
+    loadingStatus.reservations = true;
+    checkAllLoaded();
+  }, err => console.error("Reservations sync error:", err));
+
+  db.collection('workoutLogs').onSnapshot(snap => {
+    window.data.workoutLogs = [];
+    snap.forEach(doc => { window.data.workoutLogs.push(doc.data()); });
+    loadingStatus.workoutLogs = true;
+    checkAllLoaded();
+  }, err => console.error("WorkoutLogs sync error:", err));
+
+  db.collection('conditionLogs').onSnapshot(snap => {
+    window.data.conditionLogs = [];
+    snap.forEach(doc => { window.data.conditionLogs.push(doc.data()); });
+    loadingStatus.conditionLogs = true;
+    checkAllLoaded();
+  }, err => console.error("ConditionLogs sync error:", err));
+
+  db.collection('changeRequests').onSnapshot(snap => {
+    window.data.changeRequests = [];
+    snap.forEach(doc => {
+      const d = doc.data();
+      window.data.changeRequests.push({
+        ...d, id: +d.id, resId: +d.resId,
+        memberId: d.memberId != null ? +d.memberId : null,
+        reqHour: d.reqHour != null ? +d.reqHour : null
+      });
+    });
+    window.changeReqId = (window.data.changeRequests.reduce((mx, c) => Math.max(mx, c.id || 0), 0)) + 1;
+    loadingStatus.changeRequests = true;
+    checkAllLoaded();
+  }, err => console.error("ChangeRequests sync error:", err));
+
+  db.collection('settings').doc('global').onSnapshot(doc => {
+    window.data.settings = doc.exists ? doc.data() : {};
+    loadingStatus.settings = true;
+    checkAllLoaded();
+  }, err => console.error("Settings sync error:", err));
+
+  // ── 개별 문서 단위 스마트 저장 함수 (기존 인터페이스 호환 보장) ──
+  window._fbSave = async (payload) => {
+    try {
+      const batch = db.batch();
+
+      // 1. members 저장
+      if (payload.members) {
+        payload.members.forEach(m => {
+          const ref = db.collection('members').doc(String(m.id));
+          batch.set(ref, m);
+        });
+      }
+      // 2. reservations 저장
+      if (payload.reservations) {
+        payload.reservations.forEach(r => {
+          const ref = db.collection('reservations').doc(String(r.id));
+          batch.set(ref, r);
+        });
+      }
+      // 3. trainerSlots 저장 (날짜와 시간 조합으로 고유 ID 생성)
+      if (payload.trainerSlots) {
+        payload.trainerSlots.forEach(s => {
+          const ref = db.collection('trainerSlots').doc(`${s.date}_${s.hour}`);
+          batch.set(ref, s);
+        });
+      }
+      // 4. changeRequests 저장
+      if (payload.changeRequests) {
+        payload.changeRequests.forEach(c => {
+          const ref = db.collection('changeRequests').doc(String(c.id));
+          batch.set(ref, c);
+        });
+      }
+      // 5. settings 저장
+      if (payload.settings) {
+        const ref = db.collection('settings').doc('global');
+        batch.set(ref, payload.settings);
+      }
+
+      await batch.commit();
+      console.log("독립 컬렉션 배치 업데이트 완료");
+    } catch (e) {
+      console.error("배치 저장 도중 오류 발생:", e);
+    }
+  };
+
+  // ── Firebase Authentication 상태 변화 감지 및 역할 매핑 ──
+  auth.onAuthStateChanged(async (user) => {
+    if (user) {
+      // 로그인 완료 상태
+      const userDoc = await db.collection('users').doc(user.uid).get();
+      if (userDoc.exists) {
+        const profile = userDoc.data();
+        window.currentUser = {
+          uid: user.uid,
+          email: user.email,
+          role: profile.role,
+          memberId: profile.memberId || null,
+          name: profile.name || user.email.split('@')[0]
+        };
+
+        // 전역 상태에 반영
+        window.state.role = profile.role;
+        if (profile.role === 'trainer') {
+          window.state.selectedMember = null;
+        } else {
+          window.state.selectedMember = profile.memberId;
+        }
+      } else {
+        // 회원정보가 Firestore에 없는 신규 유저 처리용 디폴트 세팅
+        window.currentUser = {
+          uid: user.uid,
+          email: user.email,
+          role: 'member',
+          memberId: null,
+          name: user.email.split('@')[0]
+        };
+        window.state.role = 'member';
+      }
+      
+      document.getElementById('authView').style.display = 'none';
+      document.getElementById('mainAppContainer').style.display = 'block';
+      
+      const badge = document.getElementById('loginUserBadge');
+      if (badge) {
+        badge.textContent = window.currentUser.role === 'trainer' ? '🏋️ 트레이너 님' : `👤 회원: ${window.currentUser.name} 님`;
+      }
+      
+      if (typeof window.renderAll === 'function') window.renderAll();
+    } else {
+      // 로그아웃 상태 -> 인증 화면 강제 표시
+      window.currentUser = null;
+      document.getElementById('mainAppContainer').style.display = 'none';
+      document.getElementById('authView').style.display = 'flex';
     }
   });
 
-  // saveData용 전역 함수
-  window._fbSave = (payload) => {
-    DOC_REF.set(payload).catch(e => console.warn('Save error:', e));
-  };
 })();
 </script>
+
 <link href="https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@300;400;500;700;900&family=Space+Grotesk:wght@400;600;700&display=swap" rel="stylesheet">
+
 <style>
   :root {
     --bg: #0d0f14;
@@ -208,56 +284,98 @@
     overflow-x: hidden;
   }
 
-  /* ── HEADER ── */
+  /* ── AUTH VIEW DESIGN ── */
+  #authView {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    min-height: 100vh;
+    background: linear-gradient(135deg, #0d0f14 0%, #161923 100%);
+    padding: 20px;
+  }
+
+  .auth-card {
+    background: var(--surface);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    width: 400px;
+    padding: 32px;
+    box-shadow: 0 12px 40px rgba(0,0,0,0.6);
+  }
+
+  .auth-logo {
+    text-align: center;
+    font-family: 'Space Grotesk', sans-serif;
+    font-size: 28px;
+    font-weight: 700;
+    margin-bottom: 24px;
+  }
+  .auth-logo span { color: var(--accent); }
+
+  .auth-tabs {
+    display: flex;
+    background: var(--bg);
+    padding: 4px;
+    border-radius: 8px;
+    margin-bottom: 20px;
+  }
+  .auth-tab-btn {
+    flex: 1;
+    background: transparent;
+    border: none;
+    color: var(--text-muted);
+    padding: 10px 0;
+    font-weight: 600;
+    cursor: pointer;
+    border-radius: 6px;
+    font-size: 14px;
+    transition: all 0.2s;
+  }
+  .auth-tab-btn.active {
+    background: var(--surface2);
+    color: var(--text);
+  }
+
+  /* ── MAIN LAYOUT & APP ── */
   header {
     background: var(--surface);
     border-bottom: 1px solid var(--border);
-    padding: 0 16px;
+    padding: 0 24px;
     display: flex;
     align-items: center;
     justify-content: space-between;
-    height: 56px;
+    height: 64px;
     position: sticky;
     top: 0;
     z-index: 100;
-    gap: 8px;
-    overflow: hidden;
   }
 
   .logo {
     font-family: 'Space Grotesk', sans-serif;
-    font-size: 20px;
+    font-size: 22px;
     font-weight: 700;
     letter-spacing: -0.5px;
   }
   .logo span { color: var(--accent); }
 
-  .role-toggle {
+  .user-meta-zone {
     display: flex;
-    gap: 8px;
-    background: var(--bg);
-    padding: 4px;
-    border-radius: 10px;
+    align-items: center;
+    gap: 16px;
   }
-  .role-btn {
-    padding: 7px 18px;
-    border-radius: 7px;
-    border: none;
-    cursor: pointer;
-    font-size: 13px;
-    font-weight: 600;
-    font-family: 'Noto Sans KR', sans-serif;
-    transition: all .2s;
-    color: var(--text-muted);
-    background: transparent;
-  }
-  .role-btn.trainer.active { background: var(--trainer); color: #0d0f14; }
-  .role-btn.member.active  { background: var(--member);  color: #0d0f14; }
 
-  /* ── LAYOUT ── */
+  #loginUserBadge {
+    font-size: 14px;
+    font-weight: 600;
+    color: var(--text);
+    background: var(--surface2);
+    padding: 6px 14px;
+    border-radius: 20px;
+    border: 1px solid var(--border);
+  }
+
   .app { display: flex; height: calc(100vh - 64px); }
 
-  /* ── SIDEBAR ── */
   .sidebar {
     width: 280px;
     background: var(--surface);
@@ -267,3169 +385,302 @@
     overflow: hidden;
     flex-shrink: 0;
   }
-  .sidebar-members-wrap {
-    flex: 1;
-    overflow-y: auto;
-    overflow-x: hidden;
-  }
-  /* 스크롤바 스타일 */
-  .sidebar-members-wrap::-webkit-scrollbar { width: 4px; }
-  .sidebar-members-wrap::-webkit-scrollbar-track { background: transparent; }
-  .sidebar-members-wrap::-webkit-scrollbar-thumb { background: var(--border); border-radius: 2px; }
-  .sidebar-members-wrap::-webkit-scrollbar-thumb:hover { background: var(--text-dim); }
+  .sidebar-members-wrap { flex: 1; overflow-y: auto; padding: 10px 0; }
 
-  .mini-cal { padding: 20px; border-bottom: 1px solid var(--border); }
-  .cal-header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 14px; }
-  .cal-header h3 { font-size: 14px; font-weight: 600; }
-  .cal-nav { background: none; border: none; color: var(--text-muted); cursor: pointer; font-size: 16px; padding: 2px 6px; border-radius: 4px; transition: color .2s; }
-  .cal-nav:hover { color: var(--accent); }
-  .cal-grid { display: grid; grid-template-columns: repeat(7,1fr); gap: 2px; text-align: center; }
-  .cal-day-name { font-size: 10px; color: var(--text-muted); padding: 4px 0; font-weight: 500; }
-  .cal-day {
-    font-size: 12px; padding: 5px 2px; border-radius: 5px; cursor: pointer;
-    transition: all .15s; color: var(--text-muted);
-  }
-  .cal-day:hover { background: var(--surface2); color: var(--text); }
-  .cal-day.today { color: var(--accent); font-weight: 700; }
-  .cal-day.selected { background: var(--accent); color: #0d0f14; font-weight: 700; }
-  .cal-day.has-event::after { content:''; display:block; width:4px; height:4px; border-radius:50%; background:var(--accent3); margin:1px auto 0; }
-  .cal-day.other-month { opacity: 0.3; }
+  .main { flex: 1; overflow-y: auto; padding: 32px; }
 
-  .sidebar-section { padding: 16px 20px; border-bottom: 1px solid var(--border); }
-  .sidebar-section h4 { font-size: 11px; text-transform: uppercase; letter-spacing: 1px; color: var(--text-muted); margin-bottom: 12px; }
+  /* 기존 UI 컴포넌트 클래스 호환 */
+  .stats-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 28px; }
+  .stat-card { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 20px; }
+  .stat-label { font-size: 11px; text-transform: uppercase; color: var(--text-muted); margin-bottom: 6px; }
+  .stat-value { font-size: 26px; font-weight: 700; font-family: 'Space Grotesk', sans-serif; }
 
-  /* member list */
-  .member-item {
-    display: flex; align-items: center; gap: 10px;
-    padding: 8px 10px; border-radius: 8px; cursor: pointer;
-    transition: background .15s; margin-bottom: 4px;
-  }
-  .member-item:hover { background: var(--surface2); }
-  .member-item.selected { background: var(--surface2); border-left: 2px solid var(--member); }
-  .avatar {
-    width: 32px; height: 32px; border-radius: 50%;
-    display: flex; align-items: center; justify-content: center;
-    font-size: 12px; font-weight: 700; flex-shrink: 0;
-  }
-  .member-info { flex: 1; min-width: 0; }
-  .member-name { font-size: 13px; font-weight: 500; }
-  .member-pt { font-size: 11px; color: var(--text-muted); }
-  .pt-badge {
-    font-size: 10px; font-weight: 700; padding: 2px 7px;
-    border-radius: 20px; flex-shrink: 0;
-  }
-  .pt-badge.ok  { background: rgba(79,255,176,.15); color: var(--member); }
-  .pt-badge.low { background: rgba(255,184,79,.15);  color: var(--warning); }
-  .pt-badge.out { background: rgba(255,79,123,.15);  color: var(--danger); }
-
-  /* ── MAIN ── */
-  .main { flex: 1; overflow-y: auto; padding: 28px 32px; }
-
-  .main-header { display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 28px; }
-  .date-display h2 { font-size: 26px; font-weight: 700; letter-spacing: -0.5px; }
-  .date-display p  { color: var(--text-muted); font-size: 14px; margin-top: 4px; }
-
-  .btn {
-    display: inline-flex; align-items: center; gap: 6px;
-    padding: 10px 20px; border-radius: 9px; border: none; cursor: pointer;
-    font-size: 13px; font-weight: 600; font-family: 'Noto Sans KR', sans-serif;
-    transition: all .2s;
-  }
-  .btn-primary { background: var(--accent); color: #0d0f14; }
-  .btn-primary:hover { background: #3de89e; transform: translateY(-1px); }
-  .btn-secondary { background: var(--surface2); color: var(--text); border: 1px solid var(--border); }
-  .btn-secondary:hover { border-color: var(--accent3); color: var(--accent3); }
-  .btn-danger  { background: rgba(255,79,123,.1); color: var(--danger); border: 1px solid rgba(255,79,123,.3); }
-  .btn-danger:hover  { background: rgba(255,79,123,.2); }
-  .btn-sm { padding: 6px 12px; font-size: 12px; border-radius: 7px; }
-
-  /* stats */
-  .stats-grid { display: grid; grid-template-columns: repeat(4,1fr); gap: 14px; margin-bottom: 28px; }
-  .stat-card {
-    background: var(--surface); border: 1px solid var(--border);
-    border-radius: 12px; padding: 18px 20px;
-  }
-  .stat-label { font-size: 11px; text-transform: uppercase; letter-spacing: .8px; color: var(--text-muted); margin-bottom: 8px; }
-  .stat-value { font-size: 28px; font-weight: 700; font-family: 'Space Grotesk', sans-serif; }
-  .stat-sub   { font-size: 12px; color: var(--text-muted); margin-top: 4px; }
-
-  /* schedule blocks */
-  .schedule-grid { display: grid; grid-template-columns: 60px 1fr; gap: 0; }
-  .time-col { }
-  .time-label {
-    height: 60px; display: flex; align-items: flex-start; justify-content: flex-end;
-    padding-right: 16px; padding-top: 6px;
-    font-size: 11px; color: var(--text-dim); font-family: 'Space Grotesk', sans-serif;
-  }
+  .schedule-grid { display: grid; grid-template-columns: 60px 1fr; }
+  .time-label { height: 60px; display: flex; align-items: flex-start; justify-content: flex-end; padding-right: 16px; padding-top: 8px; font-size: 12px; color: var(--text-dim); font-family: 'Space Grotesk', sans-serif; }
   .slots-col { border-left: 1px solid var(--border); }
-  .slot {
-    height: 60px; border-bottom: 1px solid var(--border);
-    padding: 4px 8px; position: relative; cursor: pointer; transition: background .15s;
-  }
+  .slot { height: 60px; border-bottom: 1px solid var(--border); padding: 4px 8px; position: relative; cursor: pointer; }
   .slot:hover { background: var(--surface2); }
-  .slot.blocked { background: repeating-linear-gradient(45deg, transparent, transparent 4px, rgba(255,255,255,.02) 4px, rgba(255,255,255,.02) 8px); cursor: default; }
 
-  .event {
-    position: absolute; left: 8px; right: 8px; top: 4px;
-    border-radius: 8px; padding: 6px 10px;
-    font-size: 12px; cursor: pointer; transition: all .2s;
-    overflow: hidden;
-  }
-  .event:hover { transform: translateX(2px); }
-  .event.confirmed { background: rgba(79,255,176,.15); border-left: 3px solid var(--member); }
-  .event.pending   { background: rgba(79,184,255,.12); border-left: 3px solid var(--trainer); }
-  .event.cancelled { background: rgba(255,79,123,.08); border-left: 3px solid var(--danger); opacity: .6; }
-  .event-name { font-weight: 600; color: var(--text); }
-  .event-detail { color: var(--text-muted); font-size: 11px; margin-top: 1px; }
+  .open-slot { position: absolute; left: 8px; right: 8px; top: 4px; bottom: 4px; border-radius: 8px; border: 1.5px dashed var(--border); display: flex; align-items: center; justify-content: center; font-size: 12px; color: var(--text-dim); }
+  .open-slot:hover { border-color: var(--accent); color: var(--accent); background: rgba(79,255,176,0.05); }
 
-  /* open slot */
-  .open-slot {
-    position: absolute; left: 8px; right: 8px; top: 4px; bottom: 4px;
-    border-radius: 8px; border: 1.5px dashed var(--border);
-    display: flex; align-items: center; justify-content: center;
-    font-size: 12px; color: var(--text-dim); cursor: pointer; transition: all .2s;
-  }
-  .open-slot:hover { border-color: var(--accent); color: var(--accent); background: rgba(79,255,176,.04); }
+  .event { position: absolute; left: 8px; right: 8px; top: 4px; bottom: 4px; border-radius: 8px; padding: 8px 12px; font-size: 12px; }
+  .event.confirmed { background: rgba(79,255,176,0.15); border-left: 4px solid var(--member); }
+  .event.pending { background: rgba(79,184,255,0.15); border-left: 4px solid var(--trainer); }
+  .event-name { font-weight: 700; color: var(--text); }
 
-  /* 이미 예약된 슬롯 (다른 회원) */
-  .closed-slot {
-    position: absolute; left: 8px; right: 8px; top: 4px; bottom: 4px;
-    border-radius: 8px; border: 1.5px solid rgba(255,79,123,.2);
-    background: rgba(255,79,123,.05);
-    display: flex; align-items: center; justify-content: center; gap: 6px;
-    font-size: 12px; color: var(--danger); opacity: .7; cursor: not-allowed;
-    user-select: none;
-  }
-
-  /* ── MODAL ── */
-  .modal-overlay {
-    position: fixed; inset: 0; background: rgba(0,0,0,.7);
-    display: flex; align-items: center; justify-content: center; z-index: 500;
-    opacity: 0; pointer-events: none; transition: opacity .2s;
-  }
-  .modal-overlay.open { opacity: 1; pointer-events: all; }
-  .modal {
-    background: var(--surface); border: 1px solid var(--border);
-    border-radius: 16px; width: 440px; max-width: 95vw;
-    padding: 28px; transform: translateY(10px); transition: transform .2s;
-    max-height: 90vh; overflow-y: auto;
-  }
-  .modal-overlay.open .modal { transform: translateY(0); }
-  .modal h3 { font-size: 18px; font-weight: 700; margin-bottom: 20px; }
+  /* ── 폼 구성 요소 ── */
   .form-group { margin-bottom: 16px; }
-  .form-label { display: block; font-size: 12px; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: .6px; margin-bottom: 6px; }
-  .form-input, .form-select {
-    width: 100%; background: var(--bg); border: 1px solid var(--border);
-    border-radius: 8px; color: var(--text); padding: 10px 14px;
-    font-size: 14px; font-family: 'Noto Sans KR', sans-serif; outline: none; transition: border-color .2s;
-  }
+  .form-label { display: block; font-size: 12px; font-weight: 600; color: var(--text-muted); margin-bottom: 6px; text-transform: uppercase; }
+  .form-input, .form-select { width: 100%; background: var(--bg); border: 1px solid var(--border); border-radius: 8px; color: var(--text); padding: 10px 14px; font-size: 14px; outline: none; }
   .form-input:focus, .form-select:focus { border-color: var(--accent); }
-  .form-select option { background: var(--surface); }
-  .modal-actions { display: flex; gap: 10px; justify-content: flex-end; margin-top: 24px; }
 
-  /* toast */
-  .toast {
-    position: fixed; bottom: 32px; right: 32px; z-index: 999;
-    background: var(--surface); border: 1px solid var(--border);
-    border-radius: 10px; padding: 14px 20px; font-size: 14px;
-    box-shadow: 0 8px 32px rgba(0,0,0,.5);
-    transform: translateY(20px); opacity: 0; transition: all .3s;
-    display: flex; align-items: center; gap: 10px;
-  }
-  .toast.show { transform: translateY(0); opacity: 1; }
-  .toast.success .toast-icon { color: var(--member); }
-  .toast.error   .toast-icon { color: var(--danger); }
-  .toast.info    .toast-icon { color: var(--trainer); }
+  .btn { display: inline-flex; align-items: center; justify-content: center; gap: 6px; padding: 10px 20px; border-radius: 8px; border: none; cursor: pointer; font-size: 13px; font-weight: 600; transition: all 0.2s; }
+  .btn-primary { background: var(--accent); color: #0d0f14; width: 100%; }
+  .btn-secondary { background: var(--surface2); color: var(--text); border: 1px solid var(--border); }
+  .btn-logout { background: rgba(255,79,123,0.1); color: var(--danger); border: 1px solid rgba(255,79,123,0.2); padding: 6px 14px; border-radius: 20px; }
+  .btn-logout:hover { background: rgba(255,79,123,0.2); }
 
-  /* PT counter in modal */
-  .pt-counter { display: flex; align-items: center; gap: 12px; }
-  .pt-counter-val { font-size: 24px; font-weight: 700; font-family:'Space Grotesk',sans-serif; min-width: 40px; text-align: center; }
-  .counter-btn {
-    width: 32px; height: 32px; border-radius: 50%; border: 1px solid var(--border);
-    background: var(--bg); color: var(--text); cursor: pointer; font-size: 18px;
-    display: flex; align-items: center; justify-content: center; transition: all .15s;
-  }
-  .counter-btn:hover { border-color: var(--accent); color: var(--accent); }
-
-  .divider { height: 1px; background: var(--border); margin: 20px 0; }
-
-  /* section header */
-  .section-title { font-size: 13px; font-weight: 600; color: var(--text-muted); text-transform: uppercase; letter-spacing: .8px; margin-bottom: 14px; }
-
-  /* tabs */
-  .tabs { display: flex; gap: 4px; background: var(--bg); padding: 4px; border-radius: 10px; margin-bottom: 24px; }
-  .tab-btn {
-    flex: 1; padding: 8px 0; border-radius: 7px; border: none; cursor: pointer;
-    font-size: 13px; font-weight: 500; font-family: 'Noto Sans KR', sans-serif;
-    color: var(--text-muted); background: transparent; transition: all .2s;
-  }
-  .tab-btn.active { background: var(--surface2); color: var(--text); font-weight: 600; }
-
-  /* reservation list */
-  .reservation-list { display: flex; flex-direction: column; gap: 10px; }
-  .res-card {
-    background: var(--surface); border: 1px solid var(--border);
-    border-radius: 12px; padding: 16px 18px;
-    display: flex; align-items: center; gap: 16px; transition: border-color .2s;
-  }
-  .res-card:hover { border-color: var(--border); }
-  .res-time { font-size: 15px; font-weight: 700; font-family:'Space Grotesk',sans-serif; min-width: 80px; }
-  .res-info { flex: 1; }
-  .res-who   { font-size: 14px; font-weight: 600; }
-  .res-date  { font-size: 12px; color: var(--text-muted); margin-top: 2px; }
-  .res-status {
-    font-size: 11px; font-weight: 700; padding: 4px 10px; border-radius: 20px;
-  }
-  .res-status.confirmed { background: rgba(79,255,176,.15); color: var(--member); }
-  .res-status.pending   { background: rgba(79,184,255,.12); color: var(--trainer); }
-  .res-status.cancelled { background: rgba(255,79,123,.08); color: var(--danger); }
-
-  /* member view pt bar */
-  .pt-bar-wrap { background: var(--surface); border: 1px solid var(--border); border-radius: 12px; padding: 18px; margin-bottom: 14px; }
-  .pt-bar-top  { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 10px; }
-  .pt-bar-name { font-size: 14px; font-weight: 600; }
-  .pt-bar-count { font-size: 20px; font-weight: 700; font-family:'Space Grotesk',sans-serif; }
-  .pt-bar      { height: 6px; background: var(--bg); border-radius: 3px; overflow: hidden; }
-  .pt-bar-fill { height: 100%; border-radius: 3px; transition: width .4s; }
-
-
-
-  .edit-member-btn {
-    background: none; border: none; color: var(--text-dim); cursor: pointer;
-    font-size: 14px; padding: 2px 5px; border-radius: 4px;
-    opacity: 0; transition: opacity .15s, color .15s;
-    line-height: 1;
-  }
-  .member-item:hover .edit-member-btn { opacity: 1; }
-  .edit-member-btn:hover { color: var(--accent3); }
-
-  /* workout log */
-  .workout-member-tabs { display:flex; gap:6px; flex-wrap:wrap; margin-bottom:20px; }
-  .wm-tab {
-    display:flex; align-items:center; gap:6px; padding:6px 12px; border-radius:20px;
-    border:1px solid var(--border); background:var(--bg); cursor:pointer;
-    font-size:12px; font-weight:500; transition:all .15s; color:var(--text-muted);
-  }
-  .wm-tab:hover { border-color:var(--accent3); color:var(--text); }
-  .wm-tab.active { background:var(--surface2); border-color:var(--accent3); color:var(--text); font-weight:600; }
-  .wm-tab .wm-dot { width:8px; height:8px; border-radius:50%; }
-
-  .workout-card {
-    background:var(--surface); border:1px solid var(--border);
-    border-radius:12px; padding:20px; margin-bottom:16px;
-  }
-  .workout-card-header { display:flex; justify-content:space-between; align-items:center; margin-bottom:16px; }
-  .workout-card-title  { font-size:15px; font-weight:600; }
-
-  /* exercise block */
-  .ex-block {
-    background:var(--bg); border:1px solid var(--border);
-    border-radius:10px; margin-bottom:12px; overflow:hidden;
-  }
-  .ex-block-header {
-    display:flex; align-items:center; gap:10px;
-    padding:10px 14px; border-bottom:1px solid var(--border);
-    background:var(--surface2);
-  }
-  .ex-name-input {
-    flex:1; background:transparent; border:none; color:var(--text);
-    font-size:14px; font-weight:600; font-family:'Noto Sans KR',sans-serif;
-    outline:none;
-  }
-  .ex-name-input::placeholder { color:var(--text-dim); font-weight:400; }
-  .ex-block-actions { display:flex; gap:6px; align-items:center; }
-
-  /* set rows */
-  .set-table { width:100%; border-collapse:collapse; }
-  .set-table th {
-    font-size:10px; text-transform:uppercase; letter-spacing:.6px;
-    color:var(--text-muted); padding:7px 10px; text-align:center;
-    border-bottom:1px solid var(--border); background:rgba(255,255,255,.02);
-  }
-  .set-table th:first-child { text-align:left; width:60px; }
-  .set-table td { padding:5px 6px; border-bottom:1px solid rgba(255,255,255,.03); }
-  .set-table tr:last-child td { border-bottom:none; }
-  .set-num {
-    font-size:11px; font-weight:700; font-family:'Space Grotesk',sans-serif;
-    color:var(--text-muted); text-align:center; padding:0 10px;
-  }
-  .ex-input {
-    background:var(--bg); border:1px solid var(--border);
-    border-radius:6px; color:var(--text); padding:6px 8px;
-    font-size:13px; font-family:'Noto Sans KR',sans-serif;
-    outline:none; width:100%; transition:border-color .15s; text-align:center;
-  }
-  .ex-input:focus { border-color:var(--accent3); }
-  .ex-input::placeholder { color:var(--text-dim); }
-  .ex-input.note-input { text-align:left; }
-
-  /* RPE badge */
-  .rpe-select {
-    background:var(--bg); border:1px solid var(--border);
-    border-radius:6px; color:var(--text); padding:6px 4px;
-    font-size:12px; font-weight:700; font-family:'Space Grotesk',sans-serif;
-    outline:none; width:100%; cursor:pointer; text-align:center;
-    transition:border-color .15s;
-  }
-  .rpe-select:focus { border-color:var(--accent); }
-  .rpe-1,.rpe-2,.rpe-3 { color:#4fffb0; border-color:rgba(79,255,176,.3); }
-  .rpe-4,.rpe-5,.rpe-6 { color:#ffb84f; border-color:rgba(255,184,79,.3); }
-  .rpe-7,.rpe-8        { color:#ff9f4f; border-color:rgba(255,159,79,.3); }
-  .rpe-9,.rpe-10       { color:#ff4f7b; border-color:rgba(255,79,123,.3); }
-
-  .add-set-btn {
-    display:flex; align-items:center; justify-content:center; gap:6px;
-    width:100%; padding:8px; font-size:12px; color:var(--text-muted);
-    background:none; border:none; border-top:1px dashed var(--border);
-    cursor:pointer; transition:color .15s; font-family:'Noto Sans KR',sans-serif;
-  }
-  .add-set-btn:hover { color:var(--accent3); }
-
-  .del-ex-btn {
-    background:none; border:none; color:var(--text-dim); cursor:pointer;
-    font-size:14px; padding:3px 6px; border-radius:4px; transition:color .15s;
-  }
-  .del-ex-btn:hover { color:var(--danger); }
-  .del-set-btn {
-    background:none; border:none; color:var(--text-dim); cursor:pointer;
-    font-size:12px; padding:3px 6px; border-radius:4px; transition:color .15s; width:100%;
-  }
-  .del-set-btn:hover { color:var(--danger); }
-
-  .memo-input {
-    width:100%; background:var(--bg); border:1px solid var(--border);
-    border-radius:8px; color:var(--text); padding:10px 12px;
-    font-size:13px; font-family:'Noto Sans KR',sans-serif;
-    outline:none; resize:vertical; min-height:60px; transition:border-color .15s;
-  }
-  .memo-input:focus { border-color:var(--accent); }
-
-  .no-log {
-    text-align:center; padding:48px 0; color:var(--text-muted); font-size:14px;
-  }
-  .no-log .no-log-icon { font-size:36px; margin-bottom:12px; }
-
-  /* condition log */
-  .cond-card {
-    background:var(--surface); border:1px solid var(--border);
-    border-radius:12px; padding:22px; margin-bottom:14px;
-  }
-  .cond-member-header {
-    display:flex; align-items:center; gap:10px; margin-bottom:20px;
-    padding-bottom:16px; border-bottom:1px solid var(--border);
-  }
-  .cond-section-label {
-    font-size:11px; text-transform:uppercase; letter-spacing:.8px;
-    color:var(--text-muted); margin-bottom:10px; font-weight:600;
-  }
-  .cond-meters { display:flex; flex-direction:column; gap:12px; margin-bottom:20px; }
-  .cond-row { display:grid; grid-template-columns:90px 1fr; align-items:center; gap:14px; }
-  .cond-label { font-size:13px; color:var(--text-muted); }
-  .cond-slider {
-    -webkit-appearance:none; appearance:none; width:100%; height:6px;
-    border-radius:3px; outline:none; cursor:pointer;
-    background: linear-gradient(to right, var(--slider-color,var(--accent)) 0%, var(--slider-color,var(--accent)) var(--slider-pct,50%), var(--border) var(--slider-pct,50%), var(--border) 100%);
-  }
-  .cond-slider::-webkit-slider-thumb {
-    -webkit-appearance:none; width:18px; height:18px; border-radius:50%;
-    background:var(--slider-color,var(--accent)); cursor:pointer;
-    border:2px solid var(--bg); box-shadow:0 0 4px rgba(0,0,0,.4);
-  }
-  .cond-val {
-    font-size:16px; font-weight:800; font-family:'Space Grotesk',sans-serif;
-    text-align:center; min-width:52px;
-    background:var(--bg); border:1px solid var(--border);
-    border-radius:8px; padding:4px 0; line-height:1.4;
-    transition:color .15s, border-color .15s;
-  }
-
-  .mood-grid { display:flex; gap:8px; flex-wrap:wrap; margin-bottom:20px; }
-  .mood-btn {
-    padding:8px 14px; border-radius:20px; border:1px solid var(--border);
-    background:var(--bg); cursor:pointer; font-size:18px; transition:all .15s;
-    display:flex; align-items:center; gap:6px;
-  }
-  .mood-btn span { font-size:12px; color:var(--text-muted); }
-  .mood-btn:hover { border-color:var(--accent3); transform:scale(1.05); }
-  .mood-btn.selected { border-color:var(--accent); background:rgba(79,255,176,.1); }
-  .mood-btn.selected span { color:var(--text); }
-
-  .cond-summary-grid { display:grid; grid-template-columns:repeat(3,1fr); gap:10px; margin-bottom:16px; }
-  .cond-summary-item {
-    background:var(--bg); border:1px solid var(--border); border-radius:8px;
-    padding:10px 12px; text-align:center;
-  }
-  .cond-summary-label { font-size:10px; color:var(--text-muted); text-transform:uppercase; letter-spacing:.5px; margin-bottom:4px; }
-  .cond-summary-val   { font-size:18px; font-weight:700; font-family:'Space Grotesk',sans-serif; }
-
-  .cond-trainer-view { opacity:.85; pointer-events:none; }
-
-  /* joint pain */
-  .pain-grid {
-    display:grid; grid-template-columns:repeat(3,1fr); gap:10px; margin-bottom:20px;
-  }
-  .pain-item {
-    background:var(--bg); border:1px solid var(--border);
-    border-radius:10px; padding:10px 12px;
-  }
-  .pain-item-header {
-    display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;
-  }
-  .pain-joint-label { font-size:12px; font-weight:600; color:var(--text-muted); }
-  .pain-val-box {
-    width:36px; height:28px; border-radius:6px;
-    background:var(--bg); border:2px solid var(--border);
-    display:flex; align-items:center; justify-content:center;
-    font-size:14px; font-weight:800; font-family:'Space Grotesk',sans-serif;
-    color:var(--text-muted); transition:color .15s,border-color .15s; flex-shrink:0;
-  }
-  .pain-slider {
-    -webkit-appearance:none; appearance:none; width:100%; height:5px;
-    border-radius:3px; outline:none; cursor:pointer;
-    background: linear-gradient(to right, var(--pain-color,var(--border)) 0%, var(--pain-color,var(--border)) var(--pain-pct,0%), var(--border) var(--pain-pct,0%), var(--border) 100%);
-  }
-  .pain-slider::-webkit-slider-thumb {
-    -webkit-appearance:none; width:14px; height:14px; border-radius:50%;
-    background:var(--pain-color,var(--text-dim)); cursor:pointer;
-    border:2px solid var(--bg); box-shadow:0 0 3px rgba(0,0,0,.4);
-  }
-  .pain-body-map {
-    display:flex; gap:16px; align-items:flex-start;
-  }
-
-  /* change request */
-  .change-badge {
-    display:inline-flex; align-items:center; gap:4px;
-    font-size:10px; font-weight:700; padding:3px 8px; border-radius:20px;
-    background:rgba(167,139,250,.15); color:#a78bfa; border:1px solid rgba(167,139,250,.3);
-  }
-  .event.change-pending { border-left-color:#a78bfa !important; }
-
-  /* weekly view */
-  .view-toggle {
-    display:flex; gap:4px; background:var(--bg);
-    padding:3px; border-radius:8px; margin-bottom:18px;
-  }
-  .view-btn {
-    padding:5px 14px; border-radius:6px; border:none; cursor:pointer;
-    font-size:12px; font-weight:600; font-family:'Noto Sans KR',sans-serif;
-    color:var(--text-muted); background:transparent; transition:all .15s;
-  }
-  .view-btn.active { background:var(--surface2); color:var(--text); }
-
-  .week-grid {
-    display:grid;
-    grid-template-columns: 52px repeat(7, 1fr);
-    border:1px solid var(--border); border-radius:12px; overflow:hidden;
-  }
-  .week-header-empty { background:var(--surface2); border-bottom:1px solid var(--border); }
-  .week-day-header {
-    background:var(--surface2); border-bottom:1px solid var(--border);
-    border-left:1px solid var(--border);
-    padding:8px 4px; text-align:center;
-    cursor:pointer; transition:background .15s;
-  }
-  .week-day-header:hover { background:var(--surface); }
-  .week-day-header.today-col { background:rgba(79,255,176,.08); }
-  .week-day-header.selected-col { background:rgba(79,255,176,.15); }
-  .week-day-name { font-size:10px; color:var(--text-muted); text-transform:uppercase; margin-bottom:2px; }
-  .week-day-num  { font-size:15px; font-weight:700; font-family:'Space Grotesk',sans-serif; }
-  .week-day-num.today-num { color:var(--accent); }
-
-  .week-time-label {
-    min-height:52px; display:flex; align-items:flex-start; justify-content:flex-end;
-    padding:6px 10px 0 0; font-size:10px; color:var(--text-dim);
-    font-family:'Space Grotesk',sans-serif; border-bottom:1px solid var(--border);
-    background:var(--surface);
-  }
-  .week-cell {
-    min-height:52px; border-left:1px solid var(--border); border-bottom:1px solid var(--border);
-    position:relative; transition:background .15s;
-    padding:2px 3px; cursor:default;
-    display:flex; flex-direction:column; gap:2px;
-  }
-  .week-cell:hover { background:var(--surface2); }
-  .week-cell.blocked-cell { background:repeating-linear-gradient(45deg,transparent,transparent 4px,rgba(255,255,255,.015) 4px,rgba(255,255,255,.015) 8px); cursor:default; pointer-events:none; }
-  .week-cell.blocked-cell:hover { background:repeating-linear-gradient(45deg,transparent,transparent 4px,rgba(255,255,255,.015) 4px,rgba(255,255,255,.015) 8px); }
-
-  .week-event {
-    border-radius:5px; padding:4px 6px; font-size:10px; font-weight:600;
-    overflow:hidden; white-space:nowrap; text-overflow:ellipsis;
-    cursor:pointer; transition:opacity .15s; line-height:1.4;
-    display:flex; flex-direction:row; align-items:center; justify-content:space-between;
-    gap:4px; width:100%; box-sizing:border-box; flex-shrink:0;
-  }
-  .week-event:hover { opacity:0.85; }
-  .week-event.confirmed { background:rgba(79,255,176,.18); border-left:2px solid var(--member); color:var(--text); }
-  .week-event.pending   { background:rgba(79,184,255,.14); border-left:2px solid var(--trainer); color:var(--text); }
-  .week-event.change-pending { border-left-color:#a78bfa !important; }
-  .week-open {
-    width:100%; flex:1; min-height:44px; display:flex; align-items:center; justify-content:center;
-    font-size:11px; color:var(--text-dim); border:1px dashed transparent;
-    border-radius:5px; transition:all .15s; cursor:pointer;
-  }
-  .week-open:hover { border-color:var(--accent); color:var(--accent); }
-  .week-closed {
-    width:100%; min-height:44px; flex:1; display:flex; align-items:center; justify-content:center;
-    font-size:12px; color:rgba(255,79,123,.4);
-  }
-  .week-waitlist {
-    width:100%; min-height:44px; flex:1; display:flex; align-items:center; justify-content:center;
-    font-size:11px; color:#ffb84f; border:1px dashed rgba(255,184,79,.4);
-    border-radius:5px; cursor:pointer; transition:all .15s;
-  }
-  .week-waitlist:hover { background:rgba(255,184,79,.1); border-color:#ffb84f; }
-
-  /* login screen */
-  .login-overlay {
-    position:fixed; inset:0; background:var(--bg);
-    display:flex; align-items:center; justify-content:center;
-    z-index:9000; padding:20px;
-  }
-  .login-box {
-    background:var(--surface); border:1px solid var(--border);
-    border-radius:20px; padding:36px 32px; width:100%; max-width:400px;
-  }
-  .login-logo { font-family:'Space Grotesk',sans-serif; font-size:26px; font-weight:700; text-align:center; margin-bottom:6px; }
-  .login-logo span { color:var(--accent); }
-  .login-sub { text-align:center; color:var(--text-muted); font-size:13px; margin-bottom:28px; }
-  .login-tabs { display:flex; gap:4px; background:var(--bg); padding:3px; border-radius:10px; margin-bottom:24px; }
-  .login-tab {
-    flex:1; padding:9px 0; border-radius:8px; border:none; cursor:pointer;
-    font-size:13px; font-weight:600; font-family:'Noto Sans KR',sans-serif;
-    color:var(--text-muted); background:transparent; transition:all .2s;
-  }
-  .login-tab.active { background:var(--surface2); color:var(--text); }
-  .login-input {
-    width:100%; background:var(--bg); border:1px solid var(--border);
-    border-radius:10px; color:var(--text); padding:13px 16px;
-    font-size:15px; font-family:'Noto Sans KR',sans-serif;
-    outline:none; transition:border-color .2s; margin-bottom:12px;
-  }
-  .login-input:focus { border-color:var(--accent); }
-  .login-input::placeholder { color:var(--text-dim); }
-  .login-btn {
-    width:100%; padding:14px; border-radius:10px; border:none;
-    background:var(--accent); color:#0d0f14; font-size:15px; font-weight:700;
-    font-family:'Noto Sans KR',sans-serif; cursor:pointer; transition:all .2s; margin-top:4px;
-  }
-  .login-btn:hover { background:#3de89e; transform:translateY(-1px); }
-  .login-err { color:var(--danger); font-size:13px; text-align:center; margin-top:10px; min-height:20px; }
-  .login-hint { color:var(--text-muted); font-size:11px; text-align:center; margin-top:14px; line-height:1.6; }
-
-  /* reservation type colors */
-  .event.consult       { background:rgba(167,139,250,.15); border-left-color:#a78bfa; }
-  .event.trial         { background:rgba(255,184,79,.15);  border-left-color:#ffb84f; }
-  .week-event.consult  { background:rgba(167,139,250,.2);  border-left-color:#a78bfa; }
-  .week-event.trial    { background:rgba(255,184,79,.2);   border-left-color:#ffb84f; }
-  .type-badge {
-    display:inline-flex; align-items:center; gap:4px;
-    font-size:10px; font-weight:700; padding:3px 8px; border-radius:20px;
-  }
-  .type-badge.pt      { background:rgba(79,255,176,.15); color:var(--member); }
-  .type-badge.consult { background:rgba(167,139,250,.15); color:#a78bfa; }
-  .type-badge.trial   { background:rgba(255,184,79,.15);  color:#ffb84f; }
-  /* color picker dots */
-  .color-dot {
-    width: 28px; height: 28px; border-radius: 50%; cursor: pointer;
-    border: 3px solid transparent; transition: transform .15s, border-color .15s;
-  }
-  .color-dot:hover { transform: scale(1.15); }
-  .color-dot.selected { border-color: var(--text); transform: scale(1.15); }
-  @media (max-width: 900px) {
-    .stats-grid { grid-template-columns: repeat(2,1fr); }
-    .sidebar { width: 240px; }
-    .main { padding: 20px; }
-  }
-  @media (max-width: 640px) {
-    /* 모바일: 세로 레이아웃 */
-    .app { flex-direction: column; height: auto; min-height: calc(100vh - 64px); }
-
-    /* 사이드바: 가로로 펼쳐지는 드로어 */
-    .sidebar {
-      width: 100%;
-      height: auto;
-      border-right: none;
-      border-bottom: 1px solid var(--border);
-      flex-direction: column;
-      overflow: visible;
-    }
-    .sidebar-members-wrap {
-      max-height: 220px;
-      overflow-y: auto;
-    }
-    /* 캘린더 숨김 (모바일에선 공간 절약) */
-    .mini-cal { display: none; }
-
-    .main { padding: 14px; flex: 1; }
-    .stats-grid { grid-template-columns: 1fr 1fr; gap: 10px; }
-
-    /* 헤더 버튼 축소 */
-    .role-btn { padding: 6px 10px; font-size: 12px; }
-
-    /* 회원 아이템 터치 편의 */
-    .member-item { padding: 10px 14px; }
-  }
+  /* ── LOADER ── */
+  #fbLoader { position: fixed; inset: 0; background: var(--bg); z-index: 9999; display: flex; align-items: center; justify-content: center; flex-direction: column; gap: 12px; }
+  .spinner { width: 40px; height: 40px; border: 3px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin 1s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
 </style>
 </head>
 <body>
 
-<!-- 로딩 오버레이 -->
-<div id="fbLoader" style="
-  position:fixed;inset:0;background:var(--bg);
-  display:flex;flex-direction:column;align-items:center;justify-content:center;
-  z-index:9999;gap:16px;
-">
-  <div style="font-family:'Space Grotesk',sans-serif;font-size:28px;font-weight:700;color:var(--accent)">FIT<span style="color:var(--text)">SYNC</span></div>
-  <div style="width:40px;height:40px;border:3px solid var(--border);border-top-color:var(--accent);border-radius:50%;animation:spin .8s linear infinite"></div>
-  <div style="font-size:13px;color:var(--text-muted)">데이터 불러오는 중...</div>
-</div>
-<style>@keyframes spin{to{transform:rotate(360deg)}}</style>
-
-<!-- LOGIN SCREEN -->
-<div id="loginScreen" class="login-overlay" style="display:none">
-  <div class="login-box">
-    <div class="login-logo">FIT<span>SYNC</span></div>
-    <div class="login-sub">PT 스케줄 관리 시스템</div>
-    <div class="login-tabs">
-      <button class="login-tab active" id="loginTabMember" onclick="switchLoginTab('member')">👤 회원</button>
-      <button class="login-tab" id="loginTabTrainer" onclick="switchLoginTab('trainer')">🏋️ 트레이너</button>
-    </div>
-    <!-- 회원 로그인 -->
-    <div id="loginMemberForm">
-      <input class="login-input" id="loginPhone" type="tel" placeholder="전화번호 입력 (예: 010-1234-5678)"
-        oninput="this.value=this.value.replace(/[^0-9-]/g,'')"
-        onkeydown="if(event.key==='Enter') doMemberLogin()">
-      <button class="login-btn" onclick="doMemberLogin()">로그인</button>
-    </div>
-    <!-- 트레이너 로그인 -->
-    <div id="loginTrainerForm" style="display:none">
-      <input class="login-input" id="loginPw" type="password" placeholder="트레이너 비밀번호"
-        onkeydown="if(event.key==='Enter') doTrainerLogin()">
-      <button class="login-btn" onclick="doTrainerLogin()">로그인</button>
-    </div>
-    <div class="login-err" id="loginErr"></div>
-    <div class="login-hint" id="loginHint">등록된 전화번호로 로그인하세요</div>
+  <!-- 전역 로더 -->
+  <div id="fbLoader">
+    <div class="spinner"></div>
+    <div style="color: var(--text-muted); font-size: 14px;">데이터베이스 보완 커넥터 연결 중...</div>
   </div>
-</div>
 
-<!-- HEADER -->
-<header>
-  <!-- 로고 -->
-  <div class="logo">FIT<span>SYNC</span></div>
-
-  <!-- 오른쪽 영역 -->
-  <div style="display:flex;align-items:center;gap:8px;flex-shrink:0">
-    <!-- 연결 상태 -->
-    <div id="fbStatus" style="font-size:10px;padding:3px 8px;border-radius:6px;background:rgba(255,184,79,.1);border:1px solid rgba(255,184,79,.3);color:#ffb84f;white-space:nowrap">⏳</div>
-    <!-- 알림 버튼 -->
-    <button id="diagBtn" onclick="runDiagnostic()" style="display:none;background:rgba(167,139,250,.12);border:1px solid rgba(167,139,250,.3);color:#a78bfa;font-size:11px;font-weight:600;cursor:pointer;padding:5px 10px;border-radius:6px;font-family:'Noto Sans KR',sans-serif;white-space:nowrap">🔍 진단</button>
-    <button onclick="requestNotificationPermission()" id="notifBtn"
-      style="background:none;border:1px solid var(--border);color:var(--text-muted);font-size:12px;cursor:pointer;padding:5px 8px;border-radius:6px;font-family:'Noto Sans KR',sans-serif;white-space:nowrap"
-      title="푸시 알림">🔔</button>
-    <!-- 유저 정보 + 로그아웃 -->
-    <div id="loginUserBadge" style="font-size:12px;font-weight:600;color:var(--text-muted);white-space:nowrap;max-width:80px;overflow:hidden;text-overflow:ellipsis"></div>
-    <button onclick="doLogout()"
-      style="background:rgba(255,79,123,.1);border:1px solid rgba(255,79,123,.25);color:var(--danger);font-size:11px;font-weight:600;cursor:pointer;padding:5px 10px;border-radius:8px;font-family:'Noto Sans KR',sans-serif;white-space:nowrap">로그아웃</button>
-    <!-- 초기화 (점 메뉴로 숨김) -->
-    <button onclick="resetData()" style="background:none;border:none;color:var(--text-dim);font-size:14px;cursor:pointer;padding:4px;border-radius:4px" title="데이터 초기화">↺</button>
-  </div>
-</header>
-
-<div class="app">
-  <!-- SIDEBAR -->
-  <aside class="sidebar">
-    <div class="mini-cal">
-      <div class="cal-header">
-        <button class="cal-nav" onclick="prevMonth()">‹</button>
-        <h3 id="calTitle"></h3>
-        <button class="cal-nav" onclick="nextMonth()">›</button>
+  <!-- 1. Firebase Authentication 뷰존 -->
+  <div id="authView">
+    <div class="auth-card">
+      <div class="auth-logo">FITSYNC<span>.PRO</span></div>
+      
+      <div class="auth-tabs">
+        <button id="tabLogin" class="auth-tab-btn active" onclick="switchAuthMode('login')">로그인</button>
+        <button id="tabRegister" class="auth-tab-btn" onclick="switchAuthMode('register')">신규 등록</button>
       </div>
-      <div class="cal-grid" id="calGrid"></div>
-    </div>
 
-    <!-- trainer: member list -->
-    <div class="sidebar-members-wrap">
-    <div class="sidebar-section" id="sidebarMembers">
-      <h4>회원 목록</h4>
-      <div id="memberList"></div>
-    </div>
-    </div>
-  </aside>
+      <!-- 로그인 / 회원가입 통합 폼 -->
+      <form id="authForm" onsubmit="handleAuthSubmit(event)">
+        <div class="form-group">
+          <label class="form-label">이메일 주소</label>
+          <input type="email" id="authEmail" class="form-input" placeholder="name@example.com" required>
+        </div>
+        <div class="form-group">
+          <label class="form-label">비밀번호</label>
+          <input type="password" id="authPassword" class="form-input" placeholder="••••••••" required>
+        </div>
+        
+        <!-- 회원가입 시 활성화되는 확장 프로필 항목 -->
+        <div id="registerExtraFields" style="display: none; border-top: 1px dashed var(--border); padding-top: 16px; margin-top: 16px;">
+          <div class="form-group">
+            <label class="form-label">이름 / 트레이너명</label>
+            <input type="text" id="authName" class="form-input" placeholder="홍길동">
+          </div>
+          <div class="form-group">
+            <label class="form-label">계정 권한 타입</label>
+            <select id="authRole" class="form-select" onchange="toggleRoleRegisterField()">
+              <option value="member">일반 회원 (Member)</option>
+              <option value="trainer">트레이너 (Trainer)</option>
+            </select>
+          </div>
+          <div class="form-group" id="memberIdField">
+            <label class="form-label">매핑할 회원고유ID 번호 (숫자)</label>
+            <input type="number" id="authMemberId" class="form-input" placeholder="예: 1">
+          </div>
+        </div>
 
-  <!-- MAIN -->
-  <main class="main" id="mainContent"></main>
-</div>
-
-<!-- MODAL: 예약/슬롯 -->
-<div class="modal-overlay" id="modalOverlay" onclick="closeModal(event)">
-  <div class="modal" id="modal">
-    <h3 id="modalTitle">수업 예약</h3>
-    <div id="modalBody"></div>
+        <button type="submit" id="authSubmitBtn" class="btn btn-primary" style="margin-top: 12px;">로그인</button>
+      </form>
+    </div>
   </div>
-</div>
 
-<!-- TOAST -->
-<div class="toast" id="toast">
-  <span class="toast-icon" id="toastIcon">✓</span>
-  <span id="toastMsg"></span>
-</div>
+  <!-- 2. 어플리케이션 메인 컨테이너 -->
+  <div id="mainAppContainer" style="display: none;">
+    <header>
+      <div class="logo">FITSYNC<span>.PRO</span></div>
+      <div class="user-meta-zone">
+        <div id="loginUserBadge">불러오는 중...</div>
+        <button class="btn btn-logout" onclick="handleLogout()">로그아웃</button>
+      </div>
+    </header>
 
-<script>
-// ══════════════════════════════════════════
-//  DATA
-// ══════════════════════════════════════════
-const COLORS = ['#4fffb0','#4fb8ff','#ffb84f','#ff7eb8','#a78bfa','#34d399'];
+    <div class="app">
+      <!-- 사이드바 부 영역 -->
+      <div class="sidebar">
+        <div style="padding: 20px; border-bottom: 1px solid var(--border);">
+          <h3 style="font-size: 14px; font-weight: 700; color: var(--text);">📅 일정 및 필터</h3>
+        </div>
+        <div class="sidebar-members-wrap" id="sidebarMembers">
+          <!-- 스크립트 동적 주입 스페이스 -->
+        </div>
+      </div>
 
-let state = {
-  role: 'trainer',
-  selectedDate: new Date(),
-  calMonth: new Date(),
-  selectedMember: null,
-  tab: 'schedule', // schedule | list
-  scheduleView: 'week', // day | week
-};
-
-// ── 기본 시드 데이터 ──
-const today    = fmt(new Date());
-const tomorrow = fmt(new Date(Date.now()+86400000));
-
-const SEED_DATA = {
-  members: [
-    { id:1, name:'김민준', totalPt:30, usedPt:22, color:'#4fffb0' },
-    { id:2, name:'이서연', totalPt:20, usedPt:8,  color:'#4fb8ff' },
-    { id:3, name:'박지호', totalPt:10, usedPt:9,  color:'#ffb84f' },
-    { id:4, name:'최유나', totalPt:40, usedPt:15, color:'#ff7eb8' },
-  ],
-  trainerSlots: [],
-  reservations: [
-    {id:1, memberId:1, date:today,    hour:10, status:'confirmed'},
-    {id:2, memberId:2, date:today,    hour:14, status:'confirmed'},
-    {id:3, memberId:3, date:today,    hour:16, status:'pending'},
-    {id:4, memberId:1, date:tomorrow, hour:10, status:'confirmed'},
-    {id:5, memberId:4, date:tomorrow, hour:11, status:'confirmed'},
-  ],
-  workoutLogs:   [],
-  conditionLogs: [],
-  changeRequests: [],
-  settings: { dayHours: {1:[13,14,15,16,17,18,19,20,21,22],2:[13,14,15,16,17,18,19,20,21,22],3:[13,14,15,16,17,18,19,20,21,22],4:[13,14,15,16,17,18,19,20,21,22],5:[13,14,15,16,17,18,19,20,21,22]}, dateOverrides: {} },
-};
-
-
-// ── Firestore 저장 (debounce 300ms) ──
-const LS_KEY = 'fitsync_data'; // fallback용 유지
-let _saveTimer = null;
-
-function saveData(immediate) {
-  // Firestore에만 저장 (브라우저 간 일관성 보장)
-  clearTimeout(_saveTimer);
-  const doSave = () => {
-    if (!window._fbSave) return;
-    // 저장 전 숫자 타입 정규화 (Firestore 저장 후 재로드 시 타입 일관성 보장)
-    const raw = JSON.parse(JSON.stringify(data));
-    const payload = {
-      ...raw,
-      members:        (raw.members||[]).map(m=>({...m, id:+m.id, totalPt:+m.totalPt, usedPt:+m.usedPt})),
-      trainerSlots:   (raw.trainerSlots||[]).map(s=>({...s, hour:+s.hour})),
-      reservations:   (raw.reservations||[]).map(r=>({...r, id:+r.id, memberId:r.memberId!=null?+r.memberId:null, hour:+r.hour})),
-      changeRequests: (raw.changeRequests||[]).map(c=>({...c, id:+c.id, resId:+c.resId, memberId:c.memberId!=null?+c.memberId:null, reqHour:c.reqHour!=null?+c.reqHour:null})),
-    };
-    window._lastSaveJson = JSON.stringify(payload);
-    window._fbSave(payload);
-  };
-  if (immediate) { doSave(); }
-  else { _saveTimer = setTimeout(doSave, 300); }
-}
-
-// 초기 data: Firebase 도착 전까지 빈 구조로 시작 (localStorage 무시)
-// → 어떤 브라우저에서 열든 항상 Firestore 데이터가 기준
-let data = {
-  members: [], trainerSlots: [], reservations: [],
-  workoutLogs: [], conditionLogs: [], changeRequests: []
-};
-
-let rid         = 1;
-let changeReqId = 1;
-
-// Firebase module에서 접근 가능하도록 전역 노출
-window.data        = data;
-window.rid         = rid;
-window.changeReqId = changeReqId;
-
-// ══════════════════════════════════════════
-//  UTILS
-// ══════════════════════════════════════════
-function fmt(d) {
-  return d.getFullYear()+'-'+String(d.getMonth()+1).padStart(2,'0')+'-'+String(d.getDate()).padStart(2,'0');
-}
-function parseDate(s) { const [y,m,d]=s.split('-'); return new Date(+y,+m-1,+d); }
-function fmtDisp(s) {
-  const d=parseDate(s);
-  const days=['일','월','화','수','목','금','토'];
-  return `${d.getMonth()+1}월 ${d.getDate()}일 (${days[d.getDay()]})`;
-}
-function getMember(id) { return data.members.find(m=>+m.id===+id); }
-function getRemainingPt(id) { const m=getMember(id); return m ? m.totalPt-m.usedPt : 0; }
-function ptBadgeClass(id) { const r=getRemainingPt(id); return r<=0?'out':r<=3?'low':'ok'; }
-
-// ══════════════════════════════════════════
-//  ROLE
-// ══════════════════════════════════════════
-function setRole(role) {
-  state.role = role;
-  document.querySelectorAll('.role-btn').forEach(b=>b.classList.remove('active'));
-  document.querySelector('.role-btn.'+role).classList.add('active');
-  state.selectedMember = role==='member' ? (data.members[0]?.id||null) : null;
-  state.tab = 'schedule';
-  renderAll();
-}
-
-// ══════════════════════════════════════════
-//  CALENDAR
-// ══════════════════════════════════════════
-function renderCal() {
-  const cm = state.calMonth;
-  const months = ['1월','2월','3월','4월','5월','6월','7월','8월','9월','10월','11월','12월'];
-  document.getElementById('calTitle').textContent = `${cm.getFullYear()} ${months[cm.getMonth()]}`;
-
-  const first = new Date(cm.getFullYear(), cm.getMonth(), 1);
-  const last  = new Date(cm.getFullYear(), cm.getMonth()+1, 0);
-  const startDay = first.getDay();
-  const todayStr = fmt(new Date());
-  const selStr   = fmt(state.selectedDate);
-
-  // dates with events
-  const eventDates = new Set([
-    ...data.reservations.map(r=>r.date),
-    ...data.trainerSlots.map(s=>s.date),
-    ...Array.from({length:60},(_,i)=>{ const d=new Date(); d.setDate(d.getDate()+i-7); const ds=fmt(d); return isWeekday(ds)?ds:null; }).filter(Boolean),
-  ]);
-
-  let html = `<div class="cal-day-name">일</div><div class="cal-day-name">월</div>
-    <div class="cal-day-name">화</div><div class="cal-day-name">수</div>
-    <div class="cal-day-name">목</div><div class="cal-day-name">금</div>
-    <div class="cal-day-name">토</div>`;
-
-  // padding
-  for(let i=0;i<startDay;i++) html+=`<div class="cal-day other-month"></div>`;
-
-  for(let d=1;d<=last.getDate();d++){
-    const ds = `${cm.getFullYear()}-${String(cm.getMonth()+1).padStart(2,'0')}-${String(d).padStart(2,'0')}`;
-    const cls = [
-      'cal-day',
-      ds===todayStr?'today':'',
-      ds===selStr?'selected':'',
-      eventDates.has(ds)?'has-event':'',
-    ].filter(Boolean).join(' ');
-    html+=`<div class="${cls}" onclick="selectDate('${ds}')">${d}</div>`;
-  }
-  document.getElementById('calGrid').innerHTML = html;
-}
-
-function selectDate(ds) {
-  state.selectedDate = parseDate(ds);
-  renderAll();
-}
-function prevMonth() { const c=state.calMonth; state.calMonth=new Date(c.getFullYear(),c.getMonth()-1,1); renderCal(); }
-function nextMonth() { const c=state.calMonth; state.calMonth=new Date(c.getFullYear(),c.getMonth()+1,1); renderCal(); }
-
-// ══════════════════════════════════════════
-//  SIDEBAR MEMBERS
-// ══════════════════════════════════════════
-function renderSidebarMembers() {
-  if(state.role==='member') {
-    const me = getMember(currentUser?.memberId || state.selectedMember);
-    if(!me) return;
-    const remMe  = getRemainingPt(me.id);
-    const pct    = Math.round((remMe / me.totalPt) * 100);
-    const barColor = pct>30?'var(--member)':pct>10?'var(--warning)':'var(--danger)';
-    document.getElementById('sidebarMembers').innerHTML = `
-      <div style="padding:4px 0 12px">
-        <div style="display:flex;align-items:center;gap:10px;margin-bottom:16px">
-          <div class="avatar" style="width:40px;height:40px;background:${me.color}22;color:${me.color};font-size:16px">${me.name[0]}</div>
+      <!-- 메인 콘텐츠 영역 -->
+      <div class="main">
+        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 24px;">
           <div>
-            <div style="font-size:15px;font-weight:700">${me.name}</div>
-            <div style="font-size:12px;color:var(--text-muted)">${me.phone||''}${me.birth?' · '+(new Date().getFullYear()-new Date(me.birth).getFullYear())+'세':''}</div>
+            <h2 id="currentDateTitle" style="font-size: 24px; font-weight: 700;">오늘의 PT 스케줄</h2>
+            <p style="color: var(--text-muted); font-size: 13px; margin-top: 4px;">인증된 계정 권한 전용 타임라인 리스트</p>
+          </div>
+          <button class="btn btn-secondary" style="width: auto;" onclick="openQuickReservationModal()">⚡ 신규 세션 등록</button>
+        </div>
+
+        <!-- 핵심 통계 지표 그리드 -->
+        <div class="stats-grid">
+          <div class="stat-card">
+            <div class="stat-label">총 등록 회원 수</div>
+            <div class="stat-value" id="statTotalMembers">0</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">금일 배정 세션</div>
+            <div class="stat-value" id="statTodaySessions">0</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">대기 중인 변경 요청</div>
+            <div class="stat-value" id="statPendingRequests">0</div>
+          </div>
+          <div class="stat-card">
+            <div class="stat-label">남은 PT 세션 평균</div>
+            <div class="stat-value" id="statAvgSessions">0회</div>
           </div>
         </div>
-        <div style="font-size:11px;text-transform:uppercase;letter-spacing:.8px;color:var(--text-muted);margin-bottom:10px">PT 현황</div>
-        <div class="pt-bar-wrap" style="margin-bottom:0">
-          <div class="pt-bar-top">
-            <span class="pt-bar-name">잔여 횟수</span>
-            <span class="pt-bar-count" style="color:${barColor}">${remMe}<small style="font-size:13px;color:var(--text-muted)">/${me.totalPt}</small></span>
-          </div>
-          <div class="pt-bar"><div class="pt-bar-fill" style="width:${pct}%;background:${barColor}"></div></div>
+
+        <!-- 타임 스케줄 뷰보드 -->
+        <div class="schedule-grid" id="scheduleTimeline">
+          <!-- 시간대 루프 생성 스페이스 (06시 ~ 23시) -->
         </div>
       </div>
-    `;
-    return;
-  }
-  let html = '';
-  [...data.members].sort((a,b)=>a.name.localeCompare(b.name,'ko')).forEach(m=>{
-    const rem = getRemainingPt(m.id);
-    const bc  = ptBadgeClass(m.id);
-    const sel = state.selectedMember===m.id ? ' selected':'';
-    html+=`<div class="member-item${sel}" onclick="selectMember(${m.id})">
-      <div class="avatar" style="background:${m.color}22;color:${m.color}">${m.name[0]}</div>
-      <div class="member-info">
-        <div class="member-name">${m.name}</div>
-        <div class="member-pt">잔여 ${rem}회${m.phone?' · '+m.phone:''}${m.birth?' · '+( new Date().getFullYear()-new Date(m.birth).getFullYear())+'세':''}</div>
-      </div>
-      <div style="display:flex;align-items:center;gap:6px">
-        <div class="pt-badge ${bc}">${rem}</div>
-        <button class="edit-member-btn" onclick="event.stopPropagation();openEditMemberModal(${m.id})" title="수정">✎</button>
-      </div>
-    </div>`;
-  });
-  document.getElementById('sidebarMembers').innerHTML = `<div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:12px"><h4 style="margin-bottom:0">회원 목록</h4><button class="btn btn-sm" style="background:rgba(79,255,176,.12);color:var(--member);border:1px solid rgba(79,255,176,.25);padding:4px 10px;font-size:11px" onclick="openNewMemberModal()">+ 신규</button></div>${html}`;
-}
-
-function ptBarsHtml() {
-  const mb = state.role==='member' ? [getMember(state.selectedMember||data.members[0]?.id)] : data.members;
-  return mb.map(m=>{
-    const rem=getRemainingPt(m.id);
-    const pct=Math.round((rem/m.totalPt)*100);
-    const barColor = pct>30?'var(--member)':pct>10?'var(--warning)':'var(--danger)';
-    return `<div class="pt-bar-wrap">
-      <div class="pt-bar-top">
-        <span class="pt-bar-name">${m.name}</span>
-        <span class="pt-bar-count" style="color:${barColor}">${rem}<small style="font-size:13px;color:var(--text-muted)">/${m.totalPt}</small></span>
-      </div>
-      <div class="pt-bar"><div class="pt-bar-fill" style="width:${pct}%;background:${barColor}"></div></div>
-    </div>`;
-  }).join('');
-}
-
-function selectMember(id) {
-  state.selectedMember = id;
-  renderSidebarMembers();
-  renderMain();
-}
-
-function selectMemberView(id) {
-  state.selectedMember = id;
-  renderSidebarMembers();
-  renderMain();
-}
-
-// ══════════════════════════════════════════
-//  MAIN
-// ══════════════════════════════════════════
-function renderMain() {
-  const ds = fmt(state.selectedDate);
-  const dayRes = data.reservations.filter(r=>r.date===ds);
-  const daySlots = getEffectiveSlots(ds);
-
-  // stats
-  const totalToday = dayRes.filter(r=>r.status!=='cancelled').length;
-  const confirmed  = dayRes.filter(r=>r.status==='confirmed').length;
-  const pending    = dayRes.filter(r=>r.status==='pending').length;
-  const openSlots  = daySlots.filter(s=>s.open).length;
-
-  let statsHtml = '';
-  if(state.role==='trainer') {
-    statsHtml = `<div class="stats-grid">
-      <div class="stat-card">
-        <div class="stat-label">오늘 수업</div>
-        <div class="stat-value" style="color:var(--member)">${totalToday}</div>
-        <div class="stat-sub">예약 확정</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-label">대기 중</div>
-        <div class="stat-value" style="color:var(--trainer)">${pending}</div>
-        <div class="stat-sub">승인 필요</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-label">빈 슬롯</div>
-        <div class="stat-value" style="color:var(--text-muted)">${openSlots}</div>
-        <div class="stat-sub">예약 가능</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-label">전체 회원</div>
-        <div class="stat-value">${data.members.length}</div>
-        <div class="stat-sub">등록 회원</div>
-      </div>
-    </div>`;
-  } else {
-    const myId = state.selectedMember||data.members[0]?.id;
-    const me = getMember(myId);
-    const myRes = dayRes.filter(r=>+r.memberId===+myId&&r.status!=='cancelled');
-    const myUpcoming = data.reservations.filter(r=>+r.memberId===+myId&&r.status!=='cancelled'&&r.date>=ds).length;
-    statsHtml = `<div class="stats-grid">
-      <div class="stat-card">
-        <div class="stat-label">잔여 PT</div>
-        <div class="stat-value" style="color:var(--member)">${getRemainingPt(myId)}</div>
-        <div class="stat-sub">총 ${me.totalPt}회 중</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-label">오늘 수업</div>
-        <div class="stat-value" style="color:var(--trainer)">${myRes.length}</div>
-        <div class="stat-sub">예약 완료</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-label">예정 수업</div>
-        <div class="stat-value">${myUpcoming}</div>
-        <div class="stat-sub">이후 전체</div>
-      </div>
-      <div class="stat-card">
-        <div class="stat-label">예약 가능</div>
-        <div class="stat-value" style="color:var(--text-muted)">${openSlots}</div>
-        <div class="stat-sub">빈 슬롯</div>
-      </div>
-    </div>`;
-  }
-
-  // tabs
-  const tabsHtml = `<div class="tabs">
-    <button class="tab-btn ${state.tab==='schedule'?'active':''}" onclick="setTab('schedule')">📅 시간표</button>
-    <button class="tab-btn ${state.tab==='list'?'active':''}" onclick="setTab('list')">📋 예약 목록</button>
-    ${state.role==='trainer'?`<button class="tab-btn ${state.tab==='pt'?'active':''}" onclick="setTab('pt')">🎫 PT 횟수</button>`:''}
-    <button class="tab-btn ${state.tab==='workout'?'active':''}" onclick="setTab('workout')">💪 운동기록</button>
-    <button class="tab-btn ${state.tab==='condition'?'active':''}" onclick="setTab('condition')">🩺 컨디션</button>
-  </div>`;
-
-  let tabContent = '';
-  if(state.tab==='schedule') tabContent = renderScheduleTab(ds, daySlots, dayRes);
-  else if(state.tab==='list') tabContent = renderListTab(ds);
-  else if(state.tab==='pt')  tabContent = renderPtTab();
-  else if(state.tab==='workout') tabContent = renderWorkoutTab(ds);
-  else if(state.tab==='condition') tabContent = renderConditionTab(ds);
-
-  const addBtn = state.role==='trainer'
-    ? `<div style="display:flex;gap:8px">
-        <button class="btn btn-primary" onclick="openAddSlotModal('${ds}')">+ 슬롯 추가</button>
-        <button class="btn btn-secondary" onclick="openSettingsModal()" title="평일 고정 시간 설정">⚙️ 시간 설정</button>
-      </div>`
-    : `<button class="btn btn-primary" onclick="openBookModal('${ds}')">+ 예약하기</button>`;
-
-  document.getElementById('mainContent').innerHTML = `
-    <div class="main-header">
-      <div class="date-display">
-        <h2>${fmtDisp(ds)}</h2>
-        <p>${state.role==='trainer'?'트레이너 뷰':'회원 뷰 — '+(getMember(state.selectedMember||data.members[0]?.id)?.name||'')}</p>
-      </div>
-      ${addBtn}
     </div>
-    ${statsHtml}
-    ${tabsHtml}
-    ${tabContent}
-  `;
-}
+  </div>
 
-function renderScheduleTab(ds, daySlots, dayRes) {
-  // 오늘의 상담/체험 일정 (주간 뷰 위에 표시)
-  const guestRes = data.reservations.filter(r=>
-    r.date===ds && r.status!=='cancelled' && (r.type==='consult'||r.type==='trial')
-  );
-  let guestHtml = '';
-  if(state.role==='trainer' && guestRes.length) {
-    const cards = guestRes.map(r=>{
-      const typeLabel = r.type==='consult'?'💬 상담':'⭐ 체험';
-      const typeColor = r.type==='consult'?'#a78bfa':'#ffb84f';
-      const typeBg    = r.type==='consult'?'rgba(167,139,250,.1)':'rgba(255,184,79,.1)';
-      return `<div style="
-        display:flex;align-items:center;gap:12px;
-        background:${typeBg};border:1px solid ${typeColor}44;
-        border-radius:10px;padding:10px 14px;
-      ">
-        <div style="font-size:13px;font-weight:700;color:${typeColor};min-width:56px">${typeLabel}</div>
-        <div style="flex:1">
-          <div style="font-size:14px;font-weight:600">${r.guestName||'미입력'}</div>
-          <div style="font-size:12px;color:var(--text-muted)">${r.hour}:00${r.guestPhone?' · '+r.guestPhone:''}${r.memo?' · '+r.memo:''}</div>
-        </div>
-        <div style="display:flex;gap:6px;flex-shrink:0">
-          ${!r.completed?`<button class="btn btn-sm" style="background:rgba(79,255,176,.12);color:var(--member);border:1px solid rgba(79,255,176,.25)" data-resid="${String(r.id)}" onclick="completeRes(this.dataset.resid)">✅ 완료</button>`
-            :`<span style="font-size:12px;color:var(--member);font-weight:600">✅ 완료</span>`}
-          <button class="btn btn-sm btn-secondary" data-resid="${String(r.id)}" onclick="openResDetail(this.dataset.resid)">상세</button>
-          ${!r.completed?`<button class="btn btn-sm btn-danger" data-resid="${String(r.id)}" onclick="cancelRes(this.dataset.resid)">취소</button>`:''}
-        </div>
-      </div>`;
-    }).join('');
-    guestHtml = `
-      <div style="margin-bottom:16px">
-        <div style="font-size:11px;text-transform:uppercase;letter-spacing:.8px;color:var(--text-muted);margin-bottom:8px">오늘의 상담 · 체험 일정</div>
-        <div style="display:flex;flex-direction:column;gap:8px">${cards}</div>
-      </div>`;
-  }
-  return guestHtml + renderWeekView(ds);
-}
+  <script>
+    let authMode = 'login';
 
-function setScheduleView(v) {
-  state.scheduleView = v;
-  renderMain();
-}
+    function switchAuthMode(mode) {
+      authMode = mode;
+      document.getElementById('tabLogin').classList.toggle('active', mode === 'login');
+      document.getElementById('tabRegister').classList.toggle('active', mode === 'register');
+      document.getElementById('registerExtraFields').style.display = mode === 'register' ? 'block' : 'none';
+      document.getElementById('authSubmitBtn').textContent = mode === 'login' ? '로그인' : '신규 계정 생성 및 가입';
+    }
 
-function getWeekDates(ds) {
-  const d    = new Date(ds + 'T00:00:00');
-  const day  = d.getDay(); // 0=일
-  const mon  = new Date(d); mon.setDate(d.getDate() - day);
-  return Array.from({length:7}, (_, i) => {
-    const nd = new Date(mon); nd.setDate(mon.getDate() + i);
-    return fmt(nd);
-  });
-}
+    function toggleRoleRegisterField() {
+      const role = document.getElementById('authRole').value;
+      document.getElementById('memberIdField').style.display = role === 'member' ? 'block' : 'none';
+    }
 
-function renderWeekView(ds) {
-  const weekDates = getWeekDates(ds);
-  const hours     = Array.from({length:14},(_,i)=>i+10);
-  const todayStr  = fmt(new Date());
-  const myId      = state.selectedMember||data.members[0]?.id;
-  const dayNames  = ['일','월','화','수','목','금','토'];
+    async function handleAuthSubmit(e) {
+      e.preventDefault();
+      const email = document.getElementById('authEmail').value;
+      const password = document.getElementById('authPassword').value;
 
-  // 헤더
-  let header = `<div class="week-header-empty"></div>`;
-  weekDates.forEach((wd, wi) => {
-    const d       = new Date(wd + 'T00:00:00');
-    const isToday  = wd === todayStr;
-    const isSel    = wd === ds;
-    const isWD_col = isWeekday(wd);
-    header += `<div class="week-day-header${isToday?' today-col':''}${isSel?' selected-col':''}" onclick="selectDate('${wd}');setScheduleView('week')">
-      <div class="week-day-name">${dayNames[wi]}</div>
-      <div class="week-day-num${isToday?' today-num':''}">${d.getDate()}</div>
-    </div>`;
-  });
-
-  // 행
-  let bodyRows = '';
-  hours.forEach(h => {
-    bodyRows += `<div class="week-time-label">${h}:00</div>`;
-    weekDates.forEach(wd => {
-      const wSlots = getEffectiveSlots(wd);
-      const wRes   = data.reservations.filter(r=>String(r.date)===String(wd) && (r.status==='confirmed' || r.status==='pending'));
-      const slot   = wSlots.find(s=>+s.hour===+h);
-
-      let cellInner = '';
-      let cellClass = '';
-
-      if(state.role==='trainer') {
-        const resList = wRes.filter(r=>+r.hour===+h);
-        if(resList.length) {
-          cellInner = resList.map(res => {
-            const m   = getMember(+res.memberId);
-            const sc  = res.status;
-            const chg = data.changeRequests.some(c=>+c.resId===+res.id&&c.status==='pending');
-            const resType = res.type || (res.memberId ? 'pt' : 'consult');
-            const isGuest = resType !== 'pt' && !res.memberId;
-            const memberColor = isGuest
-              ? (resType==='consult'?'#a78bfa':'#ffb84f')
-              : (m?.color||'var(--member)');
-            const displayName = isGuest ? (res.guestName||'방문자') : (m?.name||'?');
-            const statusIcon  = res.completed?'✔':chg?'🔄':sc==='confirmed'?'✅':'⏳';
-            const typeIcon    = resType==='consult'?'💬':resType==='trial'?'⭐':'';
-            // data-resid 속성으로 id 전달 — 템플릿 리터럴 클로저 문제 완전 회피
-            const resIdStr = String(res.id);
-            return `<div class="week-event ${sc}${chg?' change-pending':''}"
-              data-resid="${resIdStr}"
-              onclick="event.stopPropagation();openResDetail(this.dataset.resid)"
-              style="background:${memberColor}22;border-left:3px solid ${memberColor}">
-              <span style="color:${memberColor};font-weight:700;font-size:10px;overflow:hidden;text-overflow:ellipsis">${typeIcon}${displayName}</span>
-              <span style="font-size:9px;opacity:.8;flex-shrink:0">${statusIcon}</span>
-            </div>`;
-          }).join('');
-        } else if(slot) {
-          cellInner = `<div class="week-open" onclick="event.stopPropagation();openAddResModal('${wd}',${h})">+</div>`;
+      try {
+        if (authMode === 'login') {
+          await window._auth.signInWithEmailAndPassword(email, password);
+          alert("성공적으로 로그인되었습니다.");
         } else {
-          cellClass = ' blocked-cell';
+          // 회원가입 프로세스
+          const name = document.getElementById('authName').value || email.split('@')[0];
+          const role = document.getElementById('authRole').value;
+          const memberId = document.getElementById('authMemberId').value ? parseInt(document.getElementById('authMemberId').value) : null;
+
+          const cred = await window._auth.createUserWithEmailAndPassword(email, password);
+          
+          // Firestore users 컬렉션에 독립 프로필 정보 기록 설정
+          await window._db.collection('users').doc(cred.user.uid).set({
+            uid: cred.user.uid,
+            email: email,
+            name: name,
+            role: role,
+            memberId: memberId,
+            createdAt: firebase.firestore.FieldValue.serverTimestamp()
+          });
+
+          alert("회원가입 및 권한 프로필 생성이 완료되었습니다.");
         }
-      } else {
-        // 로그인한 회원의 ID를 currentUser에서 직접 가져옴
-        const loginId  = currentUser?.memberId ?? myId;
-        const myRes    = wRes.find(r=>+r.hour===+h && +r.memberId===+loginId && r.status!=='cancelled');
-        const otherRes = wRes.find(r=>+r.hour===+h && +r.memberId!==+loginId && r.memberId!=null && r.status!=='cancelled');
-        if(myRes) {
-          const sc  = myRes.status;
-          const chg = data.changeRequests.some(c=>+c.resId===+myRes.id&&c.status==='pending');
-          const myM   = getMember(myRes.memberId);
-          const myCol = myM?.color || 'var(--member)';
-          const myIcon = myRes.completed?'✔':chg?'🔄':sc==='confirmed'?'✅':'⏳';
-          const myResIdStr = String(myRes.id);
-          cellInner = `<div class="week-event ${sc}${chg?' change-pending':''}"
-            data-resid="${myResIdStr}"
-            onclick="event.stopPropagation();openResDetail(this.dataset.resid)"
-            style="background:${myCol}22;border-left:3px solid ${myCol}">
-            <span style="color:${myCol};font-weight:700;overflow:hidden;text-overflow:ellipsis">내 수업</span>
-            <span style="font-size:9px;opacity:.8;flex-shrink:0">${myIcon}</span>
-          </div>`;
-        } else if(otherRes) {
-          // 내가 이미 대기 신청했는지 확인
-          const myWait = wRes.find(r=>+r.hour===+h && +r.memberId===+loginId && r.status==='pending');
-          if(myWait) {
-            cellInner = `<div class="week-event pending" onclick="openResDetail(${+myWait.id})">
-              <span style="color:var(--trainer);font-weight:700">대기 중</span>
-              <span style="font-size:9px;opacity:.8">⏳</span>
-            </div>`;
-          } else {
-            cellInner = `<div class="week-waitlist" onclick="event.stopPropagation();requestWaitlist('${wd}',${h})">⏳ 대기신청</div>`;
-          }
-        } else if(slot) {
-          cellInner = `<div class="week-open" onclick="event.stopPropagation();bookSlot('${wd}',${h})">+</div>`;
+      } catch (err) {
+        alert("인증 오류 처리 실패: " + err.message);
+      }
+    }
+
+    function handleLogout() {
+      if(confirm("로그아웃 하시겠습니까?")) {
+        window._auth.signOut();
+      }
+    }
+
+    // ── 비즈니스 로직 렌더링 엔진 (기존 레거시 렌더링 호환 브릿지 구축) ──
+    window.renderAll = function() {
+      if (!window._fbReady) return;
+
+      // 대시보드 스태츠 업데이트
+      document.getElementById('statTotalMembers').textContent = window.data.members.length;
+      
+      const todayStr = window.state.selectedDate;
+      const todaySessions = window.data.reservations.filter(r => r.date === todayStr);
+      document.getElementById('statTodaySessions').textContent = todaySessions.length;
+      
+      const pendingReqs = window.data.changeRequests.filter(c => c.status === 'pending');
+      document.getElementById('statPendingRequests').textContent = pendingReqs.length;
+
+      // 타임라인 그리기 스페이스 구조화
+      const timeline = document.getElementById('scheduleTimeline');
+      timeline.innerHTML = '';
+
+      // 6시부터 22시까지 타임슬롯 빌더
+      for (let h = 6; h <= 22; h++) {
+        const hourStr = String(h).padStart(2, '0') + ':00';
+        
+        const timeLabel = document.createElement('div');
+        timeLabel.className = 'time-label';
+        timeLabel.textContent = hourStr;
+
+        const slotsCol = document.createElement('div');
+        slotsCol.className = 'slots-col';
+
+        const slot = document.createElement('div');
+        slot.className = 'slot';
+        
+        // 당일 세션 검색 및 주입
+        const matchedRes = todaySessions.find(r => +r.hour === h);
+        if (matchedRes) {
+          const mInfo = window.data.members.find(m => +m.id === +matchedRes.memberId);
+          const ev = document.createElement('div');
+          ev.className = `event ${matchedRes.status || 'confirmed'}`;
+          ev.innerHTML = `<div class="event-name">${mInfo ? mInfo.name : '지정 회원'}</div><div style="font-size:10px; color:var(--text-muted);">PT 세션 완료 조율 상태</div>`;
+          slot.appendChild(ev);
         } else {
-          cellClass = ' blocked-cell';
+          const openSl = document.createElement('div');
+          openSl.className = 'open-slot';
+          openSl.textContent = '+ 공석 스케줄 배정 가능';
+          openSl.onclick = () => openQuickReservationModal(h);
+          slot.appendChild(openSl);
         }
+
+        slotsCol.appendChild(slot);
+        timeline.appendChild(timeLabel);
+        timeline.appendChild(slotsCol);
       }
-      bodyRows += `<div class="week-cell${cellClass}">${cellInner}</div>`;
-    });
-  });
 
-  return `<div style="overflow-x:auto"><div class="week-grid" style="min-width:560px">${header}${bodyRows}</div></div>`;
-}
-
-function renderListTab(ds) {
-  const myId = state.selectedMember||data.members[0]?.id;
-  let list = state.role==='trainer'
-    ? [...data.reservations].filter(r=>r.status!=='cancelled').sort((a,b)=>a.date.localeCompare(b.date)||a.hour-b.hour)
-    : [...data.reservations].filter(r=>+r.memberId===+myId && r.status!=='cancelled').sort((a,b)=>a.date.localeCompare(b.date)||a.hour-b.hour);
-
-  if(!list.length) return `<p style="color:var(--text-muted);text-align:center;margin-top:40px">예약이 없습니다.</p>`;
-
-  const html = list.map(r=>{
-    const m=getMember(r.memberId);
-    if(!m) return '';
-    const pc2 = data.changeRequests.find(c=>+c.resId===+r.id&&c.status==='pending');
-    return `<div class="res-card">
-      <div class="res-time">${r.hour}:00</div>
-      <div class="res-info">
-        <div class="res-who" style="display:flex;align-items:center;gap:8px">
-          ${state.role==='trainer'?m.name:'PT 수업'}
-          ${pc2?`<span class="change-badge">🔄 변경 대기</span>`:''}
-        </div>
-        <div class="res-date">${fmtDisp(r.date)}${pc2?` → ${fmtDisp(pc2.reqDate)} ${pc2.reqHour}:00`:''}</div>
-      </div>
-      <span class="res-status ${r.status}">${r.status==='confirmed'?'확정':r.isWaitlist?'⏳ 대기신청':'대기'}</span>
-      ${state.role==='trainer'&&r.status==='pending'?`<button class="btn btn-sm btn-primary" onclick="confirmRes(${r.id})">확정</button>`:''}
-      ${state.role==='trainer'&&pc2?`<button class="btn btn-sm" style="background:rgba(167,139,250,.15);color:#a78bfa;border:1px solid rgba(167,139,250,.3)" data-resid="${String(r.id)}" onclick="openResDetail(this.dataset.resid)">변경 검토</button>`:''}
-      ${r.status!=='cancelled'&&!pc2?`<button class="btn btn-sm btn-danger" onclick="cancelRes(${r.id})">취소</button>`:''}
-    </div>`;
-  }).join('');
-  return `<div class="reservation-list">${html}</div>`;
-}
-
-function renderPtTab() {
-  let html = `<div class="section-title">회원별 PT 잔여 현황</div>`;
-  html += [...data.members].sort((a,b)=>a.name.localeCompare(b.name,'ko')).map(m=>{
-    const rem=getRemainingPt(m.id); const pct=Math.round((rem/m.totalPt)*100);
-    const bc=pct>30?'var(--member)':pct>10?'var(--warning)':'var(--danger)';
-    return `<div class="pt-bar-wrap" style="margin-bottom:12px">
-      <div class="pt-bar-top">
-        <div style="display:flex;align-items:center;gap:10px">
-          <div class="avatar" style="background:${m.color}22;color:${m.color}">${m.name[0]}</div>
-          <span class="pt-bar-name">${m.name}</span>
-        </div>
-        <div style="display:flex;align-items:center;gap:10px">
-          <span class="pt-bar-count" style="color:${bc}">${rem}<small style="font-size:13px;color:var(--text-muted)">/${m.totalPt}</small></span>
-          <button class="btn btn-sm btn-secondary" onclick="openPtModal(${m.id})">수정</button>
-        </div>
-      </div>
-      <div class="pt-bar"><div class="pt-bar-fill" style="width:${pct}%;background:${bc}"></div></div>
-    </div>`;
-  }).join('');
-  return html;
-}
-
-
-
-
-// ══════════════════════════════════════════
-//  SCHEDULE CHANGE REQUEST
-// ══════════════════════════════════════════
-function openChangeModal(resId) {
-  const r   = data.reservations.find(x=>x.id===resId);
-  const m   = getMember(r.memberId);
-  // 날짜 목록: 슬롯이 있는 날짜
-  const availDates = [...new Set(data.trainerSlots.map(s=>s.date))].sort();
-  const dateOpts   = availDates.map(d=>`<option value="${d}" ${d===r.date?'selected':''}>${fmtDisp(d)}</option>`).join('');
-
-  // 초기 날짜의 빈 슬롯
-  const initSlots  = data.trainerSlots.filter(s=>s.date===r.date);
-  const hourOpts   = initSlots.map(s=>`<option value="${s.hour}" ${+s.hour===+r.hour?'selected':''}>${s.hour}:00</option>`).join('');
-
-  openModal('🔄 일정 변경 신청', `
-    <p style="font-size:13px;color:var(--text-muted);margin-bottom:18px">
-      <strong style="color:var(--text)">${m.name}</strong> 님의
-      <strong style="color:var(--text)">${fmtDisp(r.date)} ${r.hour}:00</strong> 수업을
-      다른 일정으로 변경 신청합니다.<br>
-      <span style="font-size:12px">트레이너 승인 후 변경이 확정됩니다.</span>
-    </p>
-    <div class="form-group">
-      <label class="form-label">변경 날짜</label>
-      <select class="form-select" id="chgDate" onchange="updateChangeHours(${resId},this.value)">${dateOpts}</select>
-    </div>
-    <div class="form-group">
-      <label class="form-label">변경 시간</label>
-      <select class="form-select" id="chgHour">${hourOpts}</select>
-    </div>
-    <div class="modal-actions">
-      <button class="btn btn-secondary" onclick="_closeModal()">취소</button>
-      <button class="btn btn-primary" onclick="submitChangeRequest(${resId})">변경 신청</button>
-    </div>
-  `);
-}
-
-function updateChangeHours(resId, date) {
-  const r     = data.reservations.find(x=>x.id===resId);
-  const slots = data.trainerSlots.filter(s=>s.date===date);
-  const sel   = document.getElementById('chgHour');
-  if(!sel) return;
-  sel.innerHTML = slots.map(s=>`<option value="${s.hour}">${s.hour}:00</option>`).join('');
-}
-
-function submitChangeRequest(resId) {
-  const r       = data.reservations.find(x=>x.id===resId);
-  const reqDate = document.getElementById('chgDate').value;
-  const reqHour = +document.getElementById('chgHour').value;
-
-  if(reqDate===r.date && +reqHour===+r.hour) {
-    showToast('현재와 동일한 일정입니다.','error'); return;
-  }
-  const conflict = data.reservations.find(rv=>rv.date===reqDate&&rv.hour===reqHour&&rv.status!=='cancelled'&&rv.id!==resId);
-  if(conflict) { showToast('해당 시간에 이미 예약이 있습니다.','error'); return; }
-
-  // 기존 대기 중인 변경 신청 제거
-  data.changeRequests = data.changeRequests.filter(c=>!(+c.resId===+resId&&c.status==='pending'));
-  data.changeRequests.push({
-    id: +changeReqId++, resId: +resId, memberId: +r.memberId,
-    reqDate, reqHour: +reqHour, status:'pending',
-    requestedBy: state.role,
-  });
-  _closeModal();
-  showToast('변경 신청이 완료되었습니다. 승인을 기다려주세요.','success');
-  renderAll();
-}
-
-function approveChange(changeId) {
-  const c = data.changeRequests.find(x=>+x.id===+changeId);
-  if(!c) return;
-  const r = data.reservations.find(x=>+x.id===+c.resId);
-  if(!r) return;
-  r.date   = c.reqDate;
-  r.hour   = +c.reqHour;
-  c.status = 'approved';
-  notifyChangeResult(c.memberId, true, c.reqDate, c.reqHour);
-  showToast('일정 변경이 승인되었습니다.','success');
-  renderAll();
-}
-
-function rejectChange(changeId) {
-  const c = data.changeRequests.find(x=>+x.id===+changeId);
-  if(c) { c.status = 'rejected'; notifyChangeResult(c.memberId, false, c.reqDate, c.reqHour); }
-  showToast('변경 신청이 거절되었습니다.','info');
-  renderAll();
-}
-
-function cancelChange(changeId) {
-  const c = data.changeRequests.find(x=>+x.id===+changeId);
-  if(c) c.status = 'cancelled';
-  showToast('변경 신청이 취소되었습니다.','info');
-  renderAll();
-}
-
-
-// ══════════════════════════════════════════
-//  LOGIN
-// ══════════════════════════════════════════
-const TRAINER_PW = 'trainer1234'; // 트레이너 기본 비밀번호
-let currentUser = null; // {role:'trainer'} or {role:'member', memberId}
-
-function showLoginScreen() {
-  document.getElementById('loginScreen').style.display = 'flex';
-  document.getElementById('loginPhone').value = '';
-  document.getElementById('loginPw').value    = '';
-  document.getElementById('loginErr').textContent = '';
-  switchLoginTab('member');
-}
-
-function hideLoginScreen() {
-  document.getElementById('loginScreen').style.display = 'none';
-}
-
-function switchLoginTab(tab) {
-  document.getElementById('loginTabMember').classList.toggle('active', tab==='member');
-  document.getElementById('loginTabTrainer').classList.toggle('active', tab==='trainer');
-  document.getElementById('loginMemberForm').style.display  = tab==='member'  ? '' : 'none';
-  document.getElementById('loginTrainerForm').style.display = tab==='trainer' ? '' : 'none';
-  document.getElementById('loginErr').textContent = '';
-  const hint = document.getElementById('loginHint');
-  hint.textContent = tab==='member' ? '등록된 전화번호로 로그인하세요' : '트레이너 전용 비밀번호를 입력하세요';
-}
-
-function normalizePhone(p) {
-  // 숫자만 추출해서 비교
-  return p.replace(/[^0-9]/g, '');
-}
-
-function doMemberLogin() {
-  const input = document.getElementById('loginPhone').value.trim();
-  if(!input) { document.getElementById('loginErr').textContent = '전화번호를 입력해주세요.'; return; }
-  const norm  = normalizePhone(input);
-  const found = data.members.find(m => normalizePhone(m.phone||'') === norm);
-  if(!found) { document.getElementById('loginErr').textContent = '등록되지 않은 전화번호예요.'; return; }
-  currentUser = { role:'member', memberId: found.id };
-  hideLoginScreen();
-  applyLogin();
-}
-
-function doTrainerLogin() {
-  const pw = document.getElementById('loginPw').value;
-  if(pw !== TRAINER_PW) { document.getElementById('loginErr').textContent = '비밀번호가 틀렸어요.'; return; }
-  currentUser = { role:'trainer' };
-  hideLoginScreen();
-  applyLogin();
-}
-
-function applyLogin() {
-  if(!currentUser) return;
-  // 세션 저장 (새로고침 후 복원)
-  try { sessionStorage.setItem('fitsync_user', JSON.stringify(currentUser)); } catch(e) {}
-  // 로그인 후 알림 리스너 시작
-  setTimeout(() => {
-    if (Notification.permission === 'granted') {
-      scheduleReminders();
-      startNotificationListener();
-      if (window._myFcmToken) saveFcmToken(window._myFcmToken);
-    }
-    const btn = document.getElementById('notifBtn');
-    if (btn) btn.textContent = Notification.permission === 'granted' ? '🔔 ON' : '🔔';
-  }, 500);
-  if(currentUser.role === 'trainer') {
-    state.role = 'trainer';
-    state.selectedMember = null;
-    document.getElementById('loginUserBadge').textContent = '🏋️ 트레이너';
-    // 진단 버튼 표시
-    const diagBtn = document.getElementById('diagBtn');
-    if (diagBtn) diagBtn.style.display = 'inline-flex';
-  } else {
-    state.role = 'member';
-    state.selectedMember = currentUser.memberId;
-    const m = getMember(currentUser.memberId);
-    document.getElementById('loginUserBadge').textContent = '👤 ' + (m?.name||'');
-    const diagBtn2 = document.getElementById('diagBtn');
-    if (diagBtn2) diagBtn2.style.display = 'none';
-  }
-  renderAll();
-}
-
-function doLogout() {
-  currentUser = null;
-  try { sessionStorage.removeItem('fitsync_user'); } catch(e) {}
-  showLoginScreen();
-}
-
-
-// ══════════════════════════════════════════
-//  SLOT HELPERS
-// ══════════════════════════════════════════
-// 요일별 시간 설정
-function getDayHours(dayNum) {
-  return (data.settings?.dayHours?.[dayNum]) || [13,14,15,16,17,18,19,20,21,22];
-}
-// 하위 호환 (isWeekday 체크용)
-function getWeekdayHours() { return [13,14,15,16,17,18,19,20,21,22]; }
-
-function isWeekday(dateStr) {
-  const d = new Date(dateStr + 'T00:00:00');
-  const day = d.getDay(); // 0=일, 1=월 ... 5=금, 6=토
-  return day >= 1 && day <= 5;
-}
-
-// 해당 날짜의 유효 슬롯 반환 (주중 고정 + 수동 추가 병합)
-function getEffectiveSlots(dateStr) {
-  const manual = data.trainerSlots.filter(s=>s.date===dateStr).map(s=>({...s, hour:+s.hour}));
-  // dateOverrides: 특정 날짜에 덮어쓴 시간이 있으면 우선 사용
-  const overrides = data.settings?.dateOverrides || {};
-  if (overrides[dateStr] !== undefined) {
-    // 완전 휴무(빈 배열)도 허용
-    const hours = overrides[dateStr];
-    return hours.map(h=>({date:dateStr, hour:h, open:true, override:true}));
-  }
-  if (isWeekday(dateStr)) {
-    const d = new Date(dateStr + 'T00:00:00');
-    const dayNum  = d.getDay();
-    const wdHours = getDayHours(dayNum);
-    const fixedSlots = wdHours.map(h=>({date:dateStr, hour:h, open:true, fixed:true}));
-    const extraSlots = manual.filter(s=>!wdHours.includes(+s.hour));
-    return [...fixedSlots, ...extraSlots];
-  }
-  return manual;
-}
-
-
-// ══════════════════════════════════════════
-//  SETTINGS
-// ══════════════════════════════════════════
-window.openSettingsModal = function openSettingsModal() {
-  // 현재 설정 복사
-  _tempDayHours = {};
-  const dh = data.settings?.dayHours || {};
-  [1,2,3,4,5].forEach(d => {
-    _tempDayHours[d] = [...(dh[d] || [13,14,15,16,17,18,19,20,21,22])];
-  });
-  _tempSelectedDay = 1; // 기본: 월요일
-
-  openModal('⚙️ 평일 고정 시간 설정', buildSettingsHTML());
-};
-
-function buildSettingsHTML() {
-  const DAY_NAMES = {1:'월요일',2:'화요일',3:'수요일',4:'목요일',5:'금요일'};
-  const allHours  = [10,11,12,13,14,15,16,17,18,19,20,21,22,23];
-  const current   = _tempDayHours[_tempSelectedDay] || [];
-
-  const dayTabs = [1,2,3,4,5].map(d => `
-    <button type="button" onclick="event.stopPropagation();selectSettingsDay(${d})"
-      style="flex:1;padding:8px 0;border-radius:7px;border:none;cursor:pointer;
-        font-size:13px;font-weight:600;font-family:'Noto Sans KR',sans-serif;
-        transition:all .15s;
-        background:${d===_tempSelectedDay?'var(--surface2)':'transparent'};
-        color:${d===_tempSelectedDay?'var(--text)':'var(--text-muted)'}"
-    >${DAY_NAMES[d]}</button>`).join('');
-
-  const hourBtns = allHours.map(h => {
-    const active = current.includes(h);
-    const label  = h < 12 ? `오전${h}` : h===12?`오후12`:`오후${h-12}`;
-    return `<button type="button" id="wh_${h}"
-      onclick="event.stopPropagation();toggleWeekdayHour(${h})"
-      style="padding:8px 10px;border-radius:8px;
-        border:1px solid ${active?'var(--accent)':'var(--border)'};
-        background:${active?'rgba(79,255,176,.15)':'var(--bg)'};
-        color:${active?'var(--accent)':'var(--text-muted)'};
-        cursor:pointer;font-size:12px;font-weight:600;
-        font-family:'Noto Sans KR',sans-serif;
-        transition:all .15s;min-width:58px;"
-    >${label}시</button>`;
-  }).join('');
-
-  return `
-    <div style="display:flex;gap:4px;background:var(--bg);padding:4px;border-radius:10px;margin-bottom:16px">
-      ${dayTabs}
-    </div>
-    <div style="display:flex;flex-wrap:wrap;gap:8px;margin-bottom:14px" id="weekdayHourBtns">
-      ${hourBtns}
-    </div>
-    <div style="font-size:12px;color:var(--text-muted);padding:10px;background:var(--bg);border-radius:8px;margin-bottom:16px">
-      선택됨: <span id="wh_preview" style="color:var(--accent);font-weight:600">${formatHourRange(current)}</span>
-    </div>
-    <div style="display:flex;gap:8px;justify-content:space-between;align-items:center">
-      <button type="button" onclick="event.stopPropagation();copyToAllDays()"
-        style="background:rgba(79,184,255,.1);border:1px solid rgba(79,184,255,.3);color:var(--trainer);
-          font-size:12px;font-weight:600;cursor:pointer;padding:7px 12px;border-radius:8px;
-          font-family:'Noto Sans KR',sans-serif">
-        전체 요일에 동일 적용
-      </button>
-      <div style="display:flex;gap:8px">
-        <button type="button" onclick="event.stopPropagation();_closeModal()" class="btn btn-secondary">취소</button>
-        <button type="button" onclick="event.stopPropagation();saveWeekdaySettings()" class="btn btn-primary">저장</button>
-      </div>
-    </div>
-  `;
-}
-
-let _tempDayHours  = null;
-let _tempSelectedDay = 1;
-let _tempWeekdayHours = null; // 하위 호환
-
-
-window.selectSettingsDay = function selectSettingsDay(d) {
-  _tempSelectedDay = d;
-  // 모달 내용 다시 그리기
-  const body = document.getElementById('modalBody');
-  if (body) body.innerHTML = buildSettingsHTML();
-};
-
-window.copyToAllDays = function copyToAllDays() {
-  const current = _tempDayHours[_tempSelectedDay] || [];
-  [1,2,3,4,5].forEach(d => { _tempDayHours[d] = [...current]; });
-  showToast('전체 요일에 적용되었습니다.', 'success');
-  const body = document.getElementById('modalBody');
-  if (body) body.innerHTML = buildSettingsHTML();
-};
-
-window.toggleWeekdayHour = function toggleWeekdayHour(h) {
-  if (!_tempDayHours) return;
-  const arr = _tempDayHours[_tempSelectedDay] || [];
-  const idx = arr.indexOf(h);
-  if (idx > -1) { arr.splice(idx, 1); }
-  else           { arr.push(h); arr.sort((a,b)=>a-b); }
-  _tempDayHours[_tempSelectedDay] = arr;
-  // 버튼 스타일 업데이트
-  const btn = document.getElementById('wh_'+h);
-  if (btn) {
-    const active = arr.includes(h);
-    btn.style.borderColor = active ? 'var(--accent)' : 'var(--border)';
-    btn.style.background  = active ? 'rgba(79,255,176,.15)' : 'var(--bg)';
-    btn.style.color       = active ? 'var(--accent)' : 'var(--text-muted)';
-  }
-  const preview = document.getElementById('wh_preview');
-  if (preview) preview.textContent = formatHourRange(arr);
-};
-
-window.formatHourRange = function formatHourRange(hours) {
-  if (!hours || !hours.length) return '없음';
-  const sorted = [...hours].sort((a,b)=>a-b);
-  const toLabel = h => h < 12 ? `오전${h}시` : h===12?'오후12시':`오후${h-12}시`;
-  // 연속 구간으로 묶기
-  const ranges = [];
-  let start = sorted[0], prev = sorted[0];
-  for (let i=1; i<=sorted.length; i++) {
-    if (i===sorted.length || sorted[i]!==prev+1) {
-      ranges.push(start===prev ? toLabel(start) : `${toLabel(start)}~${toLabel(prev)}`);
-      start = sorted[i]; prev = sorted[i];
-    } else { prev = sorted[i]; }
-  }
-  return ranges.join(', ');
-};
-
-window.saveWeekdaySettings = function saveWeekdaySettings() {
-  if (!_tempDayHours) return;
-  // 각 요일 최소 1개 이상인지 확인
-  const empty = [1,2,3,4,5].filter(d => !(_tempDayHours[d]||[]).length);
-  if (empty.length) {
-    const names = {1:'월',2:'화',3:'수',4:'목',5:'금'};
-    showToast(empty.map(d=>names[d]).join(', ')+'요일에 최소 1개 이상 선택해주세요.', 'error');
-    return;
-  }
-  if (!data.settings) data.settings = {};
-  data.settings.dayHours = {};
-  [1,2,3,4,5].forEach(d => {
-    data.settings.dayHours[d] = [...(_tempDayHours[d]||[])].sort((a,b)=>a-b);
-  });
-  _tempDayHours = null;
-  _closeModal();
-  showToast('요일별 시간이 저장되었습니다. ✅', 'success');
-  saveData(true);
-  renderAll();
-};
-
-// ══════════════════════════════════════════
-//  CONDITION LOG
-// ══════════════════════════════════════════
-const MOODS = [
-  {val:'great',  emoji:'😄', label:'최고'},
-  {val:'good',   emoji:'🙂', label:'좋음'},
-  {val:'normal', emoji:'😐', label:'보통'},
-  {val:'tired',  emoji:'😓', label:'피곤'},
-  {val:'bad',    emoji:'😞', label:'나쁨'},
-];
-
-const JOINT_DEFS = [
-  {key:'pain_neck',    label:'목',    emoji:'🔵'},
-  {key:'pain_shoulder',label:'어깨',  emoji:'🔵'},
-  {key:'pain_elbow',   label:'팔꿈치', emoji:'🔵'},
-  {key:'pain_wrist',   label:'손목',  emoji:'🔵'},
-  {key:'pain_back',    label:'등',    emoji:'🔵'},
-  {key:'pain_lumbar',  label:'허리',  emoji:'🔵'},
-  {key:'pain_hip',     label:'고관절', emoji:'🔵'},
-  {key:'pain_knee',    label:'무릎',  emoji:'🔵'},
-  {key:'pain_ankle',   label:'발목',  emoji:'🔵'},
-];
-
-function painColor(val) {
-  if(!val||val<=0) return 'var(--border)';
-  const t=(val-1)/9;
-  const r1=79,g1=255,b1=176; // green
-  const r2=255,g2=184,b2=79; // yellow
-  const r3=255,g3=79,b3=123; // red
-  let r,g,b;
-  if(t<=0.5){ const f=t*2; r=Math.round(r1+(r2-r1)*f); g=Math.round(g1+(g2-g1)*f); b=Math.round(b1+(b2-b1)*f); }
-  else       { const f=(t-0.5)*2; r=Math.round(r2+(r3-r2)*f); g=Math.round(g2+(g3-g2)*f); b=Math.round(b2+(b3-b2)*f); }
-  return `rgb(${r},${g},${b})`;
-}
-
-const SLIDER_DEFS = [
-  {key:'energy', label:'에너지', colors:['#ff4f7b','#ffb84f','#4fffb0']},
-  {key:'muscle', label:'근육통', colors:['#4fffb0','#ffb84f','#ff4f7b']},
-  {key:'sleep',  label:'수면의 질', colors:['#ff4f7b','#ffb84f','#4fffb0']},
-  {key:'stress', label:'스트레스', colors:['#4fffb0','#ffb84f','#ff4f7b']},
-];
-
-function sliderColor(colors, val) {
-  const t = (val-1)/9;
-  if(t<=0.5) {
-    const r1=parseInt(colors[0].slice(1,3),16), g1=parseInt(colors[0].slice(3,5),16), b1=parseInt(colors[0].slice(5,7),16);
-    const r2=parseInt(colors[1].slice(1,3),16), g2=parseInt(colors[1].slice(3,5),16), b2=parseInt(colors[1].slice(5,7),16);
-    const f=t*2;
-    return `rgb(${Math.round(r1+(r2-r1)*f)},${Math.round(g1+(g2-g1)*f)},${Math.round(b1+(b2-b1)*f)})`;
-  } else {
-    const r1=parseInt(colors[1].slice(1,3),16), g1=parseInt(colors[1].slice(3,5),16), b1=parseInt(colors[1].slice(5,7),16);
-    const r2=parseInt(colors[2].slice(1,3),16), g2=parseInt(colors[2].slice(3,5),16), b2=parseInt(colors[2].slice(5,7),16);
-    const f=(t-0.5)*2;
-    return `rgb(${Math.round(r1+(r2-r1)*f)},${Math.round(g1+(g2-g1)*f)},${Math.round(b1+(b2-b1)*f)})`;
-  }
-}
-
-function renderConditionTab(ds) {
-  const isMember = state.role==='member';
-  const myId = state.selectedMember||data.members[0]?.id;
-
-  // 트레이너: 모든 회원 컨디션 요약 + 상세
-  if(!isMember) {
-    const cards = [...data.members].sort((a,b)=>a.name.localeCompare(b.name,'ko')).map(m=>{
-      const log = data.conditionLogs.find(l=>+l.memberId===+m.id && l.date===ds);
-      const mood = log ? MOODS.find(md=>md.val===log.mood) : null;
-      return `<div class="cond-card">
-        <div class="cond-member-header">
-          <div class="avatar" style="background:${m.color}22;color:${m.color}">${m.name[0]}</div>
-          <div style="flex:1">
-            <div style="font-size:14px;font-weight:600">${m.name}</div>
-            <div style="font-size:12px;color:var(--text-muted)">${log?'기록 완료':'기록 없음'}</div>
-          </div>
-          ${mood?`<span style="font-size:22px">${mood.emoji}</span><span style="font-size:12px;color:var(--text-muted)">${mood.label}</span>`:''}
-        </div>
-        ${log ? `
-          <div class="cond-summary-grid">
-            ${SLIDER_DEFS.map(sd=>`
-              <div class="cond-summary-item">
-                <div class="cond-summary-label">${sd.label}</div>
-                <div class="cond-summary-val" style="color:${sliderColor(sd.colors,log[sd.key]||5)}">${log[sd.key]||'—'}</div>
-              </div>`).join('')}
-          </div>
-          ${(()=>{
-            const painParts = JOINT_DEFS.filter(jd=>(log[jd.key]||0)>=1)
-              .map(jd=>`<span style="display:inline-flex;align-items:center;gap:4px;background:var(--bg);border:1px solid ${painColor(log[jd.key])};border-radius:6px;padding:3px 8px;font-size:11px;color:${painColor(log[jd.key])};font-weight:600">${jd.label} ${log[jd.key]}</span>`);
-            return painParts.length ? `<div style="margin-top:10px"><div style="font-size:11px;color:var(--text-muted);margin-bottom:6px;text-transform:uppercase;letter-spacing:.6px">통증 부위</div><div style="display:flex;flex-wrap:wrap;gap:6px">${painParts.join('')}</div></div>` : '';
-          })()}
-          ${log.memo?`<div style="font-size:13px;color:var(--text-muted);background:var(--bg);border-radius:8px;padding:10px 12px;border:1px solid var(--border);margin-top:10px">"${log.memo}"</div>`:''}
-        ` : `<div style="text-align:center;padding:16px 0;color:var(--text-dim);font-size:13px">아직 컨디션을 기록하지 않았습니다</div>`}
-      </div>`;
-    }).join('');
-    return cards;
-  }
-
-  // 회원 뷰: 직접 입력
-  const log = data.conditionLogs.find(l=>+l.memberId===+myId && l.date===ds) || {
-    memberId:myId, date:ds, energy:5, muscle:5, sleep:5, stress:5, mood:'', memo:'', pain_neck:0, pain_shoulder:0, pain_elbow:0, pain_wrist:0, pain_back:0, pain_lumbar:0, pain_hip:0, pain_knee:0, pain_ankle:0
-  };
-  const me = getMember(myId);
-
-  const sliders = SLIDER_DEFS.map(sd=>{
-    const val = log[sd.key]||5;
-    const color = sliderColor(sd.colors, val);
-    const pct = ((val-1)/9*100).toFixed(1)+'%';
-    return `<div class="cond-row">
-      <div class="cond-label">${sd.label}</div>
-      <div style="display:flex;align-items:center;gap:10px">
-        <input type="range" class="cond-slider" min="1" max="10" value="${val}"
-          data-mid="${myId}" data-date="${ds}" data-key="${sd.key}" data-colors='${JSON.stringify(sd.colors)}'
-          style="--slider-color:${color};--slider-pct:${pct};flex:1"
-          oninput="onSliderInput(this)">
-        <div id="cond-val-${sd.key}" style="
-          width:44px;height:36px;border-radius:8px;
-          background:var(--bg);border:2px solid ${color};
-          display:flex;align-items:center;justify-content:center;
-          font-size:17px;font-weight:800;font-family:'Space Grotesk',sans-serif;
-          color:${color};flex-shrink:0;transition:color .15s,border-color .15s;
-        ">${val}</div>
-      </div>
-    </div>`;
-  }).join('');
-
-  const moodBtns = MOODS.map(md=>`
-    <button class="mood-btn ${log.mood===md.val?'selected':''}" onclick="updateCondition(${myId},'${ds}','mood','${md.val}');renderMain()">
-      ${md.emoji}<span>${md.label}</span>
-    </button>`).join('');
-
-  return `<div class="cond-card">
-    <div class="cond-member-header">
-      <div class="avatar" style="background:${me.color}22;color:${me.color}">${me.name[0]}</div>
-      <div>
-        <div style="font-size:15px;font-weight:600">${me.name} 님의 오늘 컨디션</div>
-        <div style="font-size:12px;color:var(--text-muted)">${fmtDisp(ds)}</div>
-      </div>
-    </div>
-
-    <div class="cond-section-label">기분</div>
-    <div class="mood-grid">${moodBtns}</div>
-
-    <div class="cond-section-label">세부 지표 <span style="font-size:10px;font-weight:400">(1 낮음 — 10 높음)</span></div>
-    <div class="cond-meters">${sliders}</div>
-
-    <div class="cond-section-label">관절 통증 <span style="font-size:10px;font-weight:400">(0 없음 — 10 매우 심함)</span></div>
-    <div class="pain-grid">${JOINT_DEFS.map(jd=>{
-      const pval = log[jd.key]||0;
-      const pc   = painColor(pval);
-      const ppct = pval===0?'0%':((pval-1)/9*100).toFixed(1)+'%';
-      return `<div class="pain-item">
-        <div class="pain-item-header">
-          <span class="pain-joint-label">${jd.label}</span>
-          <div id="pain-val-${jd.key}" style="
-            width:36px;height:28px;border-radius:6px;
-            background:var(--bg);border:2px solid ${pval?pc:'var(--border)'};
-            display:flex;align-items:center;justify-content:center;
-            font-size:14px;font-weight:800;font-family:'Space Grotesk',sans-serif;
-            color:${pval?pc:'var(--text-dim)'};flex-shrink:0;transition:color .15s,border-color .15s;
-          ">${pval||'0'}</div>
-        </div>
-        <input type="range" class="pain-slider" min="0" max="10" value="${pval}"
-          data-mid="${myId}" data-date="${ds}" data-key="${jd.key}"
-          style="--pain-color:${pval?pc:'var(--border)'};--pain-pct:${ppct}"
-          oninput="onPainSliderInput(this)">
-      </div>`;
-    }).join('')}</div>
-
-    <div class="cond-section-label">한마디</div>
-    <textarea class="memo-input" placeholder="오늘 몸 상태, 특이사항 등 자유롭게 적어주세요"
-      oninput="updateCondition(${myId},'${ds}','memo',this.value)">${log.memo||''}</textarea>
-
-    <div style="display:flex;justify-content:flex-end;margin-top:16px">
-      <button class="btn btn-primary" onclick="saveCondition(${myId},'${ds}')">💾 기록 저장</button>
-    </div>
-  </div>`;
-}
-
-function updateCondition(memberId, date, field, value) {
-  let log = data.conditionLogs.find(l=>+l.memberId===+memberId && l.date===date);
-  if(!log) {
-    log = { memberId, date, energy:5, muscle:5, sleep:5, stress:5, mood:'', memo:'' };
-    data.conditionLogs.push(log);
-  }
-  log[field] = value;
-  // 슬라이더 값 표시 즉시 업데이트
-  const el = document.getElementById('cond-val-'+field);
-  if(el) {
-    const sd = SLIDER_DEFS.find(s=>s.key===field);
-    if(sd) {
-      const c = sliderColor(sd.colors, +value);
-      el.textContent = value;
-      el.style.color = c;
-      el.style.borderColor = c;
-    }
-  }
-}
-
-function updateSliderStyle(slider, colorsJson) {
-  const colors = JSON.parse(colorsJson.replace(/'/g,'"'));
-  const val = +slider.value;
-  const color = sliderColor(colors, val);
-  const pct = ((val-1)/9*100).toFixed(1)+'%';
-  slider.style.setProperty('--slider-color', color);
-  slider.style.setProperty('--slider-pct', pct);
-}
-
-function onSliderInput(slider) {
-  const mid    = +slider.dataset.mid;
-  const date   = slider.dataset.date;
-  const key    = slider.dataset.key;
-  const colors = JSON.parse(slider.dataset.colors);
-  const val    = +slider.value;
-
-  // 1. 데이터 저장
-  updateCondition(mid, date, key, val);
-
-  // 2. 슬라이더 색/채움 업데이트
-  const color = sliderColor(colors, val);
-  const pct   = ((val-1)/9*100).toFixed(1)+'%';
-  slider.style.setProperty('--slider-color', color);
-  slider.style.setProperty('--slider-pct', pct);
-
-  // 3. 숫자 박스 직접 업데이트
-  const box = document.getElementById('cond-val-' + key);
-  if(box) {
-    box.textContent     = val;
-    box.style.color      = color;
-    box.style.borderColor = color;
-  }
-}
-
-function onPainSliderInput(slider) {
-  const mid  = +slider.dataset.mid;
-  const date = slider.dataset.date;
-  const key  = slider.dataset.key;
-  const val  = +slider.value;
-
-  updateCondition(mid, date, key, val);
-
-  const color = painColor(val);
-  const pct   = val===0?'0%':((val-1)/9*100).toFixed(1)+'%';
-  slider.style.setProperty('--pain-color', val?color:'var(--border)');
-  slider.style.setProperty('--pain-pct', pct);
-
-  const box = document.getElementById('pain-val-' + key);
-  if(box) {
-    box.textContent      = val;
-    box.style.color       = val ? color : 'var(--text-dim)';
-    box.style.borderColor = val ? color : 'var(--border)';
-  }
-}
-
-function saveCondition(memberId, date) {
-  const log = data.conditionLogs.find(l=>+l.memberId===+memberId && l.date===date);
-  if(!log) { showToast('변경사항이 없습니다.','info'); return; }
-  showToast('컨디션이 저장되었습니다! 💪','success');
-}
-
-// ══════════════════════════════════════════
-//  WORKOUT LOG
-// ══════════════════════════════════════════
-let workoutLogId = 1;
-// state.workoutMember: 현재 운동기록 탭에서 선택된 회원
-if(!('workoutMember' in state)) state.workoutMember = null;
-
-function renderWorkoutTab(ds) {
-  if(!state.workoutMember) state.workoutMember = (state.role==='member' ? (state.selectedMember||data.members[0]?.id||null) : (data.members[0]?.id||null));
-
-  // 회원 탭 (트레이너만 다중 선택, 회원은 본인만)
-  let memberTabsHtml = '';
-  if(state.role==='trainer') {
-    memberTabsHtml = `<div class="workout-member-tabs">` +
-      [...data.members].sort((a,b)=>a.name.localeCompare(b.name,'ko')).map(m=>`
-        <div class="wm-tab ${state.workoutMember===m.id?'active':''}" onclick="selectWorkoutMember(${m.id})">
-          <div class="wm-dot" style="background:${m.color}"></div>
-          ${m.name}
-        </div>`).join('') +
-      `</div>`;
-  }
-
-  const mid = state.workoutMember;
-  const log = data.workoutLogs.find(l=>+l.memberId===+mid && l.date===ds);
-  const me  = getMember(mid);
-
-  const rpeOpts = v => [['','RPE'],['1','1'],['2','2'],['3','3'],['4','4'],['5','5'],['6','6'],['7','7'],['8','8'],['9','9'],['10','10']]
-    .map(([val,lbl])=>`<option value="${val}" ${v===val?'selected':''}>${lbl}</option>`).join('');
-
-  const exerciseRowsHtml = (log ? log.exercises : []).map((ex,i)=>{
-    const isTrainer = state.role==='trainer';
-    const setRows = (ex.sets||[]).map((s,si)=>`
-      <tr>
-        <td><div class="set-num">${si+1}</div></td>
-        <td><input class="ex-input" type="number" min="1" placeholder="10" value="${s.reps||''}"
-          ${isTrainer?`oninput="updateSet(${mid},'${ds}',${i},${si},'reps',this.value)"`:'readonly'}></td>
-        <td><input class="ex-input" type="number" min="0" step="0.5" placeholder="60" value="${s.weight||''}"
-          ${isTrainer?`oninput="updateSet(${mid},'${ds}',${i},${si},'weight',this.value)"`:'readonly'}></td>
-        <td>
-          ${isTrainer
-            ? `<select class="rpe-select rpe-${s.rpe||''}" onchange="updateSet(${mid},'${ds}',${i},${si},'rpe',this.value);applyRpeColor(this)">${rpeOpts(s.rpe||'')}</select>`
-            : `<div class="ex-input" style="color:${rpeColor(s.rpe)};border-color:${rpeBorder(s.rpe)};font-weight:700">${s.rpe?'RPE '+s.rpe:'—'}</div>`
-          }
-        </td>
-        <td><input class="ex-input note-input" placeholder="메모" value="${s.note||''}"
-          ${isTrainer?`oninput="updateSet(${mid},'${ds}',${i},${si},'note',this.value)"`:'readonly'}></td>
-        ${isTrainer?`<td><button class="del-set-btn" onclick="deleteSet(${mid},'${ds}',${i},${si})">✕</button></td>`:'<td></td>'}
-      </tr>`).join('');
-
-    return `<div class="ex-block" id="ex-row-${i}">
-      <div class="ex-block-header">
-        <span style="font-size:13px;color:var(--text-muted);font-family:'Space Grotesk',sans-serif;min-width:20px">${i+1}.</span>
-        ${isTrainer
-          ? `<input class="ex-name-input" placeholder="운동명 (예: 스쿼트)" value="${ex.name||''}"
-              oninput="updateExercise(${mid},'${ds}',${i},'name',this.value)">`
-          : `<span style="flex:1;font-size:14px;font-weight:600">${ex.name||'이름 없음'}</span>`
-        }
-        <div class="ex-block-actions">
-          <span style="font-size:11px;color:var(--text-muted)">${(ex.sets||[]).length}세트</span>
-          ${isTrainer?`<button class="del-ex-btn" onclick="deleteExercise(${mid},'${ds}',${i})" title="운동 삭제">🗑</button>`:''}
-        </div>
-      </div>
-      <table class="set-table">
-        <thead><tr>
-          <th>세트</th><th>횟수</th><th>무게(kg)</th><th>RPE</th><th>메모</th><th></th>
-        </tr></thead>
-        <tbody>${setRows}</tbody>
-      </table>
-      ${isTrainer?`<button class="add-set-btn" onclick="addSet(${mid},'${ds}',${i})">+ 세트 추가</button>`:''}
-    </div>`;
-  }).join('');
-
-  const hasExercises = log && log.exercises.length > 0;
-
-  return `
-    ${memberTabsHtml}
-    <div class="workout-card">
-      <div class="workout-card-header">
-        <div>
-          <div class="workout-card-title">
-            <span style="display:inline-block;width:10px;height:10px;border-radius:50%;background:${me.color};margin-right:8px;vertical-align:middle"></span>
-            ${me.name} — ${fmtDisp(ds)}
-          </div>
-        </div>
-        ${state.role==='trainer'?`<button class="btn btn-sm btn-secondary" onclick="addExercise(${mid},'${ds}')">+ 운동 추가</button>`:''}
-      </div>
-
-      ${hasExercises ? `
-        <div>${exerciseRowsHtml}</div>
-        <div class="divider"></div>
-        <div class="form-group" style="margin-bottom:0">
-          <label class="form-label">종합 메모</label>
-          <textarea class="memo-input" placeholder="오늘 수업 총평, 다음 수업 참고사항 등"
-            oninput="updateMemo(${mid},'${ds}',this.value)">${log.memo||''}</textarea>
-        </div>
-      ` : `
-        <div class="no-log">
-          <div class="no-log-icon">💪</div>
-          <div>${state.role==='trainer'?`운동을 추가해서 ${me.name} 님의 기록을 시작하세요`:'트레이너가 운동을 기록해드립니다'}</div>
-          ${state.role==='trainer'?`<button class="btn btn-primary" style="margin-top:16px" onclick="addExercise(${mid},'${ds}')">+ 첫 운동 추가</button>`:''}
-        </div>
-      `}
-    </div>
-  `;
-}
-
-function selectWorkoutMember(id) {
-  state.workoutMember = id;
-  renderMain();
-}
-
-function getOrCreateLog(memberId, date) {
-  let log = data.workoutLogs.find(l=>+l.memberId===+memberId && l.date===date);
-  if(!log) {
-    log = { id: workoutLogId++, memberId, date, exercises:[], memo:'' };
-    data.workoutLogs.push(log);
-  }
-  return log;
-}
-
-function addExercise(memberId, date) {
-  const log = getOrCreateLog(memberId, date);
-  log.exercises.push({ name:'', sets:[{reps:'',weight:'',rpe:'',note:''}] });
-  renderMain();
-  // 새로 추가된 입력칸에 포커스
-  setTimeout(()=>{
-    const rows = document.querySelectorAll('[id^="ex-row-"]');
-    if(rows.length) {
-      const last = rows[rows.length-1];
-      const inp  = last.querySelector('input');
-      if(inp) inp.focus();
-    }
-  }, 50);
-}
-
-function deleteExercise(memberId, date, idx) {
-  const log = data.workoutLogs.find(l=>+l.memberId===+memberId && l.date===date);
-  if(log) { log.exercises.splice(idx,1); if(!log.exercises.length && !log.memo) data.workoutLogs = data.workoutLogs.filter(l=>l!==log); }
-  renderMain();
-}
-
-function updateExercise(memberId, date, idx, field, value) {
-  const log = getOrCreateLog(memberId, date);
-  if(log.exercises[idx]) log.exercises[idx][field] = value;
-}
-
-function updateSet(memberId, date, exIdx, setIdx, field, value) {
-  const log = getOrCreateLog(memberId, date);
-  const ex  = log.exercises[exIdx];
-  if(ex && ex.sets[setIdx]) ex.sets[setIdx][field] = value;
-}
-
-function addSet(memberId, date, exIdx) {
-  const log = getOrCreateLog(memberId, date);
-  const ex  = log.exercises[exIdx];
-  if(!ex) return;
-  // 마지막 세트 값을 복사해서 편의 제공
-  const prev = ex.sets[ex.sets.length-1];
-  ex.sets.push({ reps: prev?prev.reps:'', weight: prev?prev.weight:'', rpe:'', note:'' });
-  renderMain();
-  setTimeout(()=>{
-    const rows = document.querySelectorAll(`#ex-row-${exIdx} tbody tr`);
-    if(rows.length){ const inp=rows[rows.length-1].querySelector('input'); if(inp) inp.focus(); }
-  }, 50);
-}
-
-function deleteSet(memberId, date, exIdx, setIdx) {
-  const log = data.workoutLogs.find(l=>+l.memberId===+memberId && l.date===date);
-  const ex  = log && log.exercises[exIdx];
-  if(!ex) return;
-  ex.sets.splice(setIdx, 1);
-  if(!ex.sets.length) ex.sets.push({ reps:'', weight:'', rpe:'', note:'' }); // 최소 1세트
-  renderMain();
-}
-
-function rpeColor(rpe) {
-  const n=+rpe; if(!n) return 'var(--text-muted)';
-  if(n<=3) return '#4fffb0'; if(n<=6) return '#ffb84f'; if(n<=8) return '#ff9f4f'; return '#ff4f7b';
-}
-function rpeBorder(rpe) {
-  const n=+rpe; if(!n) return 'var(--border)';
-  if(n<=3) return 'rgba(79,255,176,.3)'; if(n<=6) return 'rgba(255,184,79,.3)'; if(n<=8) return 'rgba(255,159,79,.3)'; return 'rgba(255,79,123,.3)';
-}
-function applyRpeColor(sel) {
-  sel.className = 'rpe-select rpe-'+(sel.value||'');
-}
-
-function updateMemo(memberId, date, value) {
-  const log = getOrCreateLog(memberId, date);
-  log.memo = value;
-}
-
-function setTab(t) { state.tab=t; if(t==='workout') state.workoutMember=state.selectedMember||data.members[0]?.id; renderMain(); }
-
-// ══════════════════════════════════════════
-//  MODALS
-// ══════════════════════════════════════════
-function openModal(title, bodyHtml) {
-  document.getElementById('modalTitle').textContent = title;
-  document.getElementById('modalBody').innerHTML = bodyHtml;
-  document.getElementById('modalOverlay').classList.add('open');
-}
-function closeModal(e) {
-  if(e && e.target !== document.getElementById('modalOverlay')) return;
-  document.getElementById('modalOverlay').classList.remove('open');
-}
-function _closeModal() { document.getElementById('modalOverlay').classList.remove('open'); }
-
-// Add slot (trainer)
-function openAddSlotModal(date) {
-  const allHours  = [10,11,12,13,14,15,16,17,18,19,20,21,22,23];
-  const isWD      = isWeekday(date);
-  const overrides = data.settings?.dateOverrides || {};
-  const hasOverride = overrides[date] !== undefined;
-
-  // 현재 이 날짜에 적용되는 시간 (override > 요일기본값 > 빈값)
-  let currentHours;
-  if (hasOverride) {
-    currentHours = [...overrides[date]];
-  } else if (isWD) {
-    const dn = new Date(date + 'T00:00:00').getDay();
-    currentHours = [...getDayHours(dn)];
-  } else {
-    currentHours = data.trainerSlots.filter(s=>s.date===date).map(s=>+s.hour);
-  }
-
-  const hourBtns = allHours.map(h => {
-    const active = currentHours.includes(h);
-    const label  = h < 12 ? `오전${h}시` : h===12?`오후12시`:`오후${h-12}시`;
-    return `<button type="button" id="ds_${h}"
-      onclick="event.stopPropagation();toggleDateSlotHour(${h},'${date}')"
-      style="padding:7px 9px;border-radius:8px;
-        border:1px solid ${active?'var(--accent)':'var(--border)'};
-        background:${active?'rgba(79,255,176,.15)':'var(--bg)'};
-        color:${active?'var(--accent)':'var(--text-muted)'};
-        cursor:pointer;font-size:11px;font-weight:600;
-        font-family:'Noto Sans KR',sans-serif;min-width:56px;"
-    >${label}</button>`;
-  }).join('');
-
-  const dayName = isWD ? ['','월','화','수','목','금'][new Date(date+'T00:00:00').getDay()] : '주말';
-  const baseInfo = isWD && !hasOverride
-    ? `<div style="font-size:11px;color:var(--text-muted);margin-bottom:10px">기본값: ${dayName}요일 설정 기준 — 이 날짜만 다르게 설정할 수 있어요</div>`
-    : hasOverride
-    ? `<div style="font-size:11px;color:#ffb84f;margin-bottom:10px">⚡ 이 날짜는 개별 설정 중입니다</div>`
-    : `<div style="font-size:11px;color:var(--text-muted);margin-bottom:10px">주말 — 열 시간을 직접 선택하세요</div>`;
-
-  openModal(`📅 ${fmtDisp(date)} 시간 설정`, `
-    ${baseInfo}
-    <div style="display:flex;flex-wrap:wrap;gap:7px;margin-bottom:14px" id="dateSlotBtns">
-      ${hourBtns}
-    </div>
-    <div style="font-size:12px;color:var(--text-muted);padding:10px;background:var(--bg);border-radius:8px;margin-bottom:14px">
-      선택됨: <span id="ds_preview" style="color:var(--accent);font-weight:600">${formatHourRange(currentHours)||'없음(휴무)'}</span>
-    </div>
-    <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
-      ${isWD && hasOverride
-        ? `<button type="button" onclick="event.stopPropagation();resetDateOverride('${date}')"
-            style="background:rgba(255,184,79,.1);border:1px solid rgba(255,184,79,.3);color:#ffb84f;
-              font-size:12px;font-weight:600;cursor:pointer;padding:7px 12px;border-radius:8px;
-              font-family:'Noto Sans KR',sans-serif">↺ 요일 기본값으로 복원</button>`
-        : `<span></span>`}
-      <div style="display:flex;gap:8px">
-        <button type="button" class="btn btn-secondary" onclick="event.stopPropagation();_closeModal()">취소</button>
-        <button type="button" class="btn btn-primary" onclick="event.stopPropagation();saveDateSlots('${date}')">저장</button>
-      </div>
-    </div>
-  `);
-  // 임시 저장
-  window._tempDateSlotHours = [...currentHours];
-}
-
-window.toggleDateSlotHour = function(h, date) {
-  if (!window._tempDateSlotHours) return;
-  const arr  = window._tempDateSlotHours;
-  const idx  = arr.indexOf(h);
-  if (idx > -1) arr.splice(idx, 1);
-  else          { arr.push(h); arr.sort((a,b)=>a-b); }
-  // 버튼 스타일
-  const btn = document.getElementById('ds_'+h);
-  if (btn) {
-    const active = arr.includes(h);
-    btn.style.borderColor = active ? 'var(--accent)' : 'var(--border)';
-    btn.style.background  = active ? 'rgba(79,255,176,.15)' : 'var(--bg)';
-    btn.style.color       = active ? 'var(--accent)' : 'var(--text-muted)';
-  }
-  const p = document.getElementById('ds_preview');
-  if (p) p.textContent = formatHourRange(arr) || '없음(휴무)';
-};
-
-window.saveDateSlots = function(date) {
-  const hours = window._tempDateSlotHours || [];
-  const isWD  = isWeekday(date);
-  // 요일 기본값과 동일하면 override 제거 (불필요한 override 방지)
-  if (isWD) {
-    const dn   = new Date(date + 'T00:00:00').getDay();
-    const base = getDayHours(dn);
-    const same = base.length === hours.length && base.every((h,i)=>h===hours[i]);
-    if (same) {
-      if (data.settings.dateOverrides) delete data.settings.dateOverrides[date];
-    } else {
-      if (!data.settings.dateOverrides) data.settings.dateOverrides = {};
-      data.settings.dateOverrides[date] = [...hours].sort((a,b)=>a-b);
-    }
-    // trainerSlots에서도 해당 날짜 제거 (override로 통합)
-    data.trainerSlots = data.trainerSlots.filter(s=>s.date!==date);
-  } else {
-    // 주말: trainerSlots에 저장
-    data.trainerSlots = data.trainerSlots.filter(s=>s.date!==date);
-    hours.forEach(h=>data.trainerSlots.push({date, hour:h, open:true}));
-  }
-  window._tempDateSlotHours = null;
-  _closeModal();
-  showToast('시간이 저장되었습니다. ✅', 'success');
-  saveData(true);
-  renderAll();
-};
-
-window.resetDateOverride = function(date) {
-  if (data.settings?.dateOverrides) delete data.settings.dateOverrides[date];
-  window._tempDateSlotHours = null;
-  _closeModal();
-  showToast('요일 기본값으로 복원되었습니다.', 'info');
-  saveData(true);
-  renderAll();
-};
-
-function saveSlots(date) {
-  // 하위 호환 (혹시 다른 곳에서 호출 시)
-  saveDateSlots(date);
-}
-
-// Add res (trainer directly)
-function openAddResModal(date, hour) {
-  const memberOpts = [...data.members].sort((a,b)=>a.name.localeCompare(b.name,'ko'))
-    .map(m=>`<option value="${m.id}">${m.name} (잔여 ${getRemainingPt(m.id)}회)</option>`).join('');
-  openModal('➕ 일정 추가', `
-    <div class="form-group">
-      <label class="form-label">날짜 / 시간</label>
-      <input class="form-input" value="${fmtDisp(date)} ${hour}:00" readonly>
-    </div>
-    <div class="form-group">
-      <label class="form-label">일정 유형</label>
-      <select class="form-select" id="resTypeSel" onchange="toggleResTypeFields()">
-        <option value="pt">🏋️ PT 수업</option>
-        <option value="consult">💬 상담</option>
-        <option value="trial">⭐ 체험</option>
-      </select>
-    </div>
-    <div id="resFieldMember" class="form-group">
-      <label class="form-label">회원 선택</label>
-      <select class="form-select" id="resMemSel">${memberOpts}</select>
-    </div>
-    <div id="resFieldGuest" class="form-group" style="display:none">
-      <label class="form-label">이름</label>
-      <input class="form-input" id="resGuestName" placeholder="방문자 이름">
-      <label class="form-label" style="margin-top:10px">연락처 (선택)</label>
-      <input class="form-input" id="resGuestPhone" placeholder="010-0000-0000" style="margin-top:6px">
-    </div>
-    <div class="form-group">
-      <label class="form-label">메모 (선택)</label>
-      <input class="form-input" id="resMemo" placeholder="특이사항, 문의내용 등">
-    </div>
-    <div class="modal-actions">
-      <button class="btn btn-secondary" onclick="_closeModal()">취소</button>
-      <button class="btn btn-primary" onclick="addResManual('${date}',${hour})">추가</button>
-    </div>
-  `);
-}
-
-function toggleResTypeFields() {
-  const type = document.getElementById('resTypeSel')?.value;
-  const isMember = type === 'pt';
-  document.getElementById('resFieldMember').style.display = isMember ? '' : 'none';
-  document.getElementById('resFieldGuest').style.display  = isMember ? 'none' : '';
-}
-
-function addResManual(date, hour) {
-  const type   = document.getElementById('resTypeSel')?.value || 'pt';
-  const memo   = (document.getElementById('resMemo')?.value||'').trim();
-  const conflict = data.reservations.find(r=>r.date===date&&+r.hour===+hour&&r.status!=='cancelled');
-  if(conflict){ showToast('해당 시간에 이미 예약이 있습니다.','error'); return; }
-
-  if(type === 'pt') {
-    const memberId = +document.getElementById('resMemSel').value;
-    const m = getMember(memberId);
-    if(!m){ showToast('회원을 선택해주세요.','error'); return; }
-    data.reservations.push({id:+rid++, memberId:+memberId, date:String(date), hour:+hour, status:'confirmed', type:'pt', memo});
-    _closeModal(); showToast(`${m.name} 님 PT 예약이 추가되었습니다.`,'success'); renderAll();
-  } else {
-    const guestName  = (document.getElementById('resGuestName')?.value||'').trim();
-    const guestPhone = (document.getElementById('resGuestPhone')?.value||'').trim();
-    if(!guestName){ showToast('이름을 입력해주세요.','error'); return; }
-    data.reservations.push({id:+rid++, memberId:null, date:String(date), hour:+hour, status:'confirmed',
-      type, guestName, guestPhone, memo});
-    const typeLabel = type==='consult'?'상담':'체험';
-    _closeModal(); showToast(`${guestName} 님 ${typeLabel} 일정이 추가되었습니다.`,'success'); renderAll();
-  }
-}
-
-// Book (member)
-function openBookModal(date) {
-  const myId=state.selectedMember||data.members[0]?.id;
-  const slots=data.trainerSlots.filter(s=>s.date===date);
-  if(!slots.length){ showToast('해당 날짜에 오픈된 슬롯이 없습니다.','info'); return; }
-  const opts=slots.map(s=>`<option value="${s.hour}">${s.hour}:00</option>`).join('');
-  openModal('📝 수업 예약', `
-    <div class="form-group">
-      <label class="form-label">날짜</label>
-      <input class="form-input" value="${fmtDisp(date)}" readonly>
-    </div>
-    <div class="form-group">
-      <label class="form-label">시간 선택</label>
-      <select class="form-select" id="bookHour">${opts}</select>
-    </div>
-    <div class="modal-actions">
-      <button class="btn btn-secondary" onclick="_closeModal()">취소</button>
-      <button class="btn btn-primary" onclick="doBook('${date}')">예약 신청</button>
-    </div>
-  `);
-}
-
-function doBook(date) {
-  const hour=+document.getElementById('bookHour').value;
-  bookSlot(date,hour);
-}
-
-function bookSlot(date, hour) {
-  const myId = state.selectedMember||data.members[0]?.id;
-  const m    = getMember(myId);
-  if(!m) return;
-  if(getRemainingPt(myId)<=0){ showToast('PT 횟수가 부족합니다.','error'); return; }
-  // 내가 이미 이 시간에 신청/확정된 예약이 있으면 중복 방지
-  const myExist = data.reservations.find(r=>r.date===date&&+r.hour===+hour&&+r.memberId===+myId&&r.status!=='cancelled');
-  if(myExist){ showToast('이미 신청한 시간입니다.','info'); return; }
-  data.reservations.push({id:+rid++, memberId:+myId, date:String(date), hour:+hour, status:'pending', type:'pt'});
-  _closeModal();
-  showToast('예약이 신청되었습니다! 트레이너 확인 후 확정됩니다.','success');
-  notifyTrainerNewRequest(myId, date, hour);
-  renderAll();
-}
-
-function requestWaitlist(date, hour) {
-  const myId = state.selectedMember||data.members[0]?.id;
-  const m    = getMember(myId);
-  if(!m) return;
-  if(getRemainingPt(myId)<=0){ showToast('PT 횟수가 부족합니다.','error'); return; }
-  const myExist = data.reservations.find(r=>r.date===date&&+r.hour===+hour&&+r.memberId===+myId&&r.status!=='cancelled');
-  if(myExist){ showToast('이미 신청한 시간입니다.','info'); return; }
-  // 대기 신청 확인 모달
-  openModal('⏳ 대기 신청', `
-    <p style="font-size:14px;color:var(--text-muted);line-height:1.7;margin-bottom:20px">
-      <strong style="color:var(--text)">${fmtDisp(date)} ${hour}:00</strong>는<br>
-      이미 다른 회원이 예약한 시간이에요.<br>
-      대기 신청을 하면 기존 예약이 취소될 경우<br>
-      트레이너가 확정해드립니다.
-    </p>
-    <div class="modal-actions">
-      <button class="btn btn-secondary" onclick="_closeModal()">취소</button>
-      <button class="btn btn-primary" style="background:#ffb84f;color:#0d0f14" onclick="confirmWaitlist('${date}',${hour})">⏳ 대기 신청</button>
-    </div>
-  `);
-}
-
-function confirmWaitlist(date, hour) {
-  const myId = state.selectedMember||data.members[0]?.id;
-  data.reservations.push({id:+rid++, memberId:+myId, date:String(date), hour:+hour, status:'pending', type:'pt', isWaitlist:true});
-  _closeModal();
-  showToast('대기 신청이 완료되었습니다. 트레이너 확인 후 알려드릴게요!','success');
-  renderAll();
-}
-
-// Reservation detail
-function openResDetail(resId) {
-  const _resId = typeof resId === 'object' ? resId.resid || resId : resId;
-  const r = data.reservations.find(x=>+x.id===+_resId);
-  if(!r) { showToast('일정 정보를 찾을 수 없습니다.','error'); return; }
-  const m  = r.memberId ? getMember(+r.memberId) : null;
-  const sc = {confirmed:'✅ 확정', pending: r.isWaitlist?'⏳ 대기 신청':'⏳ 승인 대기', cancelled:'❌ 취소'};
-  const pendingChange = data.changeRequests.find(c=>+c.resId===+r.id&&c.status==='pending');
-  // type 없으면 memberId 유무로 판단
-  const resolvedType = r.type || (r.memberId ? 'pt' : 'consult');
-  const typeLabel = {pt:'🏋️ PT 수업', consult:'💬 상담', trial:'⭐ 체험'}[resolvedType];
-  const typeClass = resolvedType;
-  const isGuest   = resolvedType !== 'pt' && !r.memberId;
-
-  openModal('📋 일정 상세', `
-    <div style="display:flex;flex-direction:column;gap:12px">
-      <div style="display:flex;justify-content:space-between;align-items:center">
-        <span style="color:var(--text-muted)">유형</span>
-        <span class="type-badge ${typeClass}">${typeLabel}</span>
-      </div>
-      <div style="display:flex;justify-content:space-between">
-        <span style="color:var(--text-muted)">${isGuest?'방문자':'회원'}</span>
-        <div style="text-align:right">
-          <strong>${isGuest ? (r.guestName||'미입력') : m?.name||'알 수 없음'}</strong>
-          ${!isGuest&&m?.birth?`<div style="font-size:11px;color:var(--text-muted);margin-top:2px">${m.birth} (${new Date().getFullYear()-new Date(m.birth).getFullYear()}세)</div>`:''}
-          ${isGuest&&r.guestPhone?`<div style="font-size:11px;color:var(--text-muted);margin-top:2px">${r.guestPhone}</div>`:''}
-        </div>
-      </div>
-      <div style="display:flex;justify-content:space-between">
-        <span style="color:var(--text-muted)">날짜</span><strong>${fmtDisp(r.date)}</strong>
-      </div>
-      <div style="display:flex;justify-content:space-between">
-        <span style="color:var(--text-muted)">시간</span><strong>${r.hour}:00</strong>
-      </div>
-      <div style="display:flex;justify-content:space-between">
-        <span style="color:var(--text-muted)">상태</span>
-        <div style="display:flex;align-items:center;gap:8px">
-          <strong>${sc[r.status]}</strong>
-          ${pendingChange?`<span class="change-badge">🔄 변경 대기</span>`:''}
-        </div>
-      </div>
-      ${!isGuest?`<div style="display:flex;justify-content:space-between"><span style="color:var(--text-muted)">잔여 PT</span><strong>${getRemainingPt(r.memberId)}회</strong></div>`:''}
-      ${r.completed?`<div style="display:flex;justify-content:space-between"><span style="color:var(--text-muted)">이용완료</span><strong style="color:var(--member)">✅ 완료${!isGuest?' (PT 차감됨)':''}</strong></div>`:''}
-      ${r.memo?`<div style="display:flex;justify-content:space-between"><span style="color:var(--text-muted)">메모</span><strong style="max-width:200px;text-align:right">${r.memo}</strong></div>`:''}
-      ${pendingChange?`
-      <div style="background:rgba(167,139,250,.08);border:1px solid rgba(167,139,250,.25);border-radius:8px;padding:12px">
-        <div style="font-size:11px;color:#a78bfa;font-weight:600;margin-bottom:8px">📬 변경 신청 내용</div>
-        <div style="display:flex;justify-content:space-between;font-size:13px;margin-bottom:4px">
-          <span style="color:var(--text-muted)">변경 날짜</span><strong>${fmtDisp(pendingChange.reqDate)}</strong>
-        </div>
-        <div style="display:flex;justify-content:space-between;font-size:13px">
-          <span style="color:var(--text-muted)">변경 시간</span><strong>${pendingChange.reqHour}:00</strong>
-        </div>
-      </div>`:''}
-    </div>
-    <div class="divider"></div>
-    <div class="modal-actions">
-      ${state.role==='trainer'&&r.status==='pending'?`<button class="btn btn-primary" onclick="confirmRes(${r.id});_closeModal()">확정하기</button>`:''}
-      ${state.role==='trainer'&&r.status==='confirmed'&&!r.completed?`<button class="btn btn-primary" style="background:var(--accent)" onclick="completeRes(${r.id})">✅ 이용완료</button>`:''}
-      ${r.status==='confirmed'&&r.completed?`<span style="font-size:13px;color:var(--member);font-weight:600">✅ 이용완료 처리됨</span>`:''}
-      ${r.status==='confirmed'&&pendingChange&&state.role==='trainer'?`
-        <button class="btn btn-primary" onclick="approveChange(${+pendingChange.id});_closeModal()">✅ 변경 승인</button>
-        <button class="btn btn-danger"  onclick="rejectChange(${+pendingChange.id});_closeModal()">❌ 변경 거절</button>
-      `:''}
-      ${r.status==='confirmed'&&!pendingChange&&!r.completed?`<button class="btn btn-secondary" style="border-color:rgba(167,139,250,.4);color:#a78bfa" onclick="openChangeModal(${r.id})">🔄 일정 변경 신청</button>`:''}
-      ${r.status!=='cancelled'&&!pendingChange&&!r.completed?`<button class="btn btn-danger" onclick="cancelRes(${r.id});_closeModal()">취소하기</button>`:''}
-      ${pendingChange&&state.role==='member'?`<button class="btn btn-danger" onclick="cancelChange(${+pendingChange.id});_closeModal()">변경 신청 취소</button>`:''}
-      <button class="btn btn-secondary" onclick="_closeModal()">닫기</button>
-    </div>
-  `);
-}
-
-// PT modal (trainer)
-function openPtModal(memberId) {
-  const m=getMember(memberId);
-  openModal(`🎫 PT 횟수 수정 — ${m.name}`, `
-    <div class="form-group">
-      <label class="form-label">총 PT 횟수</label>
-      <div class="pt-counter">
-        <button class="counter-btn" onclick="changePt(${memberId},'total',-1)">−</button>
-        <div class="pt-counter-val" id="totalPtVal">${m.totalPt}</div>
-        <button class="counter-btn" onclick="changePt(${memberId},'total',1)">+</button>
-        <span style="color:var(--text-muted);font-size:13px;margin-left:4px">회</span>
-      </div>
-    </div>
-    <div class="form-group">
-      <label class="form-label">사용한 횟수</label>
-      <div class="pt-counter">
-        <button class="counter-btn" onclick="changePt(${memberId},'used',-1)">−</button>
-        <div class="pt-counter-val" id="usedPtVal">${m.usedPt}</div>
-        <button class="counter-btn" onclick="changePt(${memberId},'used',1)">+</button>
-        <span style="color:var(--text-muted);font-size:13px;margin-left:4px">회</span>
-      </div>
-    </div>
-    <div style="margin-top:12px;padding:12px;background:var(--bg);border-radius:8px;text-align:center">
-      잔여: <strong id="remPtDisp" style="color:var(--member)">${getRemainingPt(memberId)}</strong>회
-    </div>
-    <div class="modal-actions">
-      <button class="btn btn-secondary" onclick="_closeModal()">취소</button>
-      <button class="btn btn-primary" onclick="_closeModal();showToast('PT 횟수가 저장되었습니다.','success');saveData(true);renderAll()">저장</button>
-    </div>
-  `);
-}
-
-function changePt(id,field,delta){
-  const m=getMember(id);
-  if(field==='total') m.totalPt=Math.max(m.usedPt,m.totalPt+delta);
-  else m.usedPt=Math.max(0,Math.min(m.totalPt,m.usedPt+delta));
-  document.getElementById('totalPtVal').textContent=m.totalPt;
-  document.getElementById('usedPtVal').textContent=m.usedPt;
-  document.getElementById('remPtDisp').textContent=getRemainingPt(id);
-}
-
-
-// New Member Registration
-function openNewMemberModal() {
-  const colorOpts = ['#4fffb0','#4fb8ff','#ffb84f','#ff7eb8','#a78bfa','#34d399'];
-  const colorBtns = colorOpts.map((c,i)=>
-    `<div class="color-dot ${i===0?'selected':''}" style="background:${c}" onclick="selectColor('${c}',this)" data-color="${c}"></div>`
-  ).join('');
-  openModal('👤 신규 회원 등록', `
-    <div class="form-group">
-      <label class="form-label">이름 *</label>
-      <input class="form-input" id="newName" placeholder="홍길동" maxlength="10">
-    </div>
-    <div class="form-group">
-      <label class="form-label">연락처</label>
-      <input class="form-input" id="newPhone" placeholder="010-0000-0000" maxlength="13">
-    </div>
-    <div class="form-group">
-      <label class="form-label">생년월일</label>
-      <input class="form-input" id="newBirth" type="date" max="${new Date().toISOString().slice(0,10)}">
-    </div>
-    <div class="form-group">
-      <label class="form-label">총 PT 횟수 *</label>
-      <div class="pt-counter">
-        <button class="counter-btn" onclick="changeNewPt(-1)">−</button>
-        <div class="pt-counter-val" id="newPtVal">10</div>
-        <button class="counter-btn" onclick="changeNewPt(1)">+</button>
-        <span style="color:var(--text-muted);font-size:13px;margin-left:4px">회</span>
-      </div>
-    </div>
-    <div class="form-group">
-      <label class="form-label">아바타 색상</label>
-      <div style="display:flex;gap:10px;margin-top:4px" id="colorPicker">${colorBtns}</div>
-    </div>
-    <div class="modal-actions">
-      <button class="btn btn-secondary" onclick="_closeModal()">취소</button>
-      <button class="btn btn-primary" onclick="saveNewMember()">등록하기</button>
-    </div>
-  `);
-}
-
-let _newPt = 10;
-let _newColor = '#4fffb0';
-
-function changeNewPt(delta) {
-  _newPt = Math.max(1, _newPt + delta);
-  const el = document.getElementById('newPtVal');
-  if(el) el.textContent = _newPt;
-}
-
-function selectColor(color, el) {
-  _newColor = color;
-  document.querySelectorAll('.color-dot').forEach(d=>d.classList.remove('selected'));
-  el.classList.add('selected');
-}
-
-function saveNewMember() {
-  const name = (document.getElementById('newName').value||'').trim();
-  if(!name) { showToast('이름을 입력해주세요.','error'); return; }
-  const phone = (document.getElementById('newPhone').value||'').trim();
-  const birth = (document.getElementById('newBirth').value||'').trim();
-  const newId = Math.max(...data.members.map(m=>m.id), 0) + 1;
-  data.members.push({ id:newId, name, phone, birth, totalPt:_newPt, usedPt:0, color:_newColor });
-  _newPt = 10; _newColor = '#4fffb0';
-  _closeModal();
-  showToast(`${name} 님이 등록되었습니다!`, 'success');
-  saveData(true);
-  renderAll();
-}
-
-
-// Edit Member
-function openEditMemberModal(id) {
-  const m = getMember(id);
-  if(!m) return;
-  const colorOpts = ['#4fffb0','#4fb8ff','#ffb84f','#ff7eb8','#a78bfa','#34d399'];
-  const colorBtns = colorOpts.map(c=>
-    `<div class="color-dot ${c===m.color?'selected':''}" style="background:${c}" onclick="selectColor('${c}',this)" data-color="${c}"></div>`
-  ).join('');
-  _newPt = m.totalPt;
-  _newColor = m.color;
-  openModal('✏️ 회원 정보 수정', `
-    <div class="form-group">
-      <label class="form-label">이름 *</label>
-      <input class="form-input" id="editName" value="${m.name}" maxlength="10">
-    </div>
-    <div class="form-group">
-      <label class="form-label">연락처</label>
-      <input class="form-input" id="editPhone" value="${m.phone||''}" placeholder="010-0000-0000" maxlength="13">
-    </div>
-    <div class="form-group">
-      <label class="form-label">생년월일</label>
-      <input class="form-input" id="editBirth" type="date" value="${m.birth||''}" max="${new Date().toISOString().slice(0,10)}">
-    </div>
-    <div class="form-group">
-      <label class="form-label">총 PT 횟수</label>
-      <div class="pt-counter">
-        <button class="counter-btn" onclick="changeNewPt(-1)">−</button>
-        <div class="pt-counter-val" id="newPtVal">${m.totalPt}</div>
-        <button class="counter-btn" onclick="changeNewPt(1)">+</button>
-        <span style="color:var(--text-muted);font-size:13px;margin-left:4px">회</span>
-      </div>
-    </div>
-    <div class="form-group">
-      <label class="form-label">사용한 횟수</label>
-      <div class="pt-counter">
-        <button class="counter-btn" onclick="changeUsedPt(${id},-1)">−</button>
-        <div class="pt-counter-val" id="editUsedVal">${m.usedPt}</div>
-        <button class="counter-btn" onclick="changeUsedPt(${id},1)">+</button>
-        <span style="color:var(--text-muted);font-size:13px;margin-left:4px">회 (잔여: <span id="editRemVal">${getRemainingPt(id)}</span>회)</span>
-      </div>
-    </div>
-    <div class="form-group">
-      <label class="form-label">아바타 색상</label>
-      <div style="display:flex;gap:10px;margin-top:4px" id="colorPicker">${colorBtns}</div>
-    </div>
-    <div class="divider"></div>
-    <div style="display:flex;justify-content:space-between;align-items:center">
-      <button class="btn btn-sm btn-danger" onclick="confirmDeleteMember(${id})">🗑 회원 삭제</button>
-      <div style="display:flex;gap:8px">
-        <button class="btn btn-secondary" onclick="_closeModal()">취소</button>
-        <button class="btn btn-primary" onclick="saveEditMember(${id})">저장</button>
-      </div>
-    </div>
-  `);
-}
-
-function changeUsedPt(id, delta) {
-  const m = getMember(id);
-  const newUsed = Math.max(0, Math.min(_newPt, m.usedPt + delta));
-  m.usedPt = newUsed;
-  const uel = document.getElementById('editUsedVal');
-  const rel = document.getElementById('editRemVal');
-  if(uel) uel.textContent = newUsed;
-  if(rel) rel.textContent = _newPt - newUsed;
-}
-
-function saveEditMember(id) {
-  const m = getMember(id);
-  const name = (document.getElementById('editName').value||'').trim();
-  if(!name) { showToast('이름을 입력해주세요.','error'); return; }
-  m.name  = name;
-  m.phone = (document.getElementById('editPhone').value||'').trim();
-  m.birth = (document.getElementById('editBirth').value||'').trim();
-  m.totalPt = _newPt;
-  m.color = _newColor;
-  _newPt = 10; _newColor = '#4fffb0';
-  _closeModal();
-  showToast(`${name} 님 정보가 수정되었습니다.`, 'success');
-  saveData(true);
-  renderAll();
-}
-
-function confirmDeleteMember(id) {
-  const m = getMember(id);
-  openModal('🗑 회원 삭제', `
-    <p style="color:var(--text-muted);font-size:14px;line-height:1.6">
-      <strong style="color:var(--text)">${m.name}</strong> 님을 삭제하면<br>
-      해당 회원의 모든 예약 내역도 함께 삭제됩니다.<br>
-      정말 삭제하시겠습니까?
-    </p>
-    <div class="modal-actions" style="margin-top:20px">
-      <button class="btn btn-secondary" onclick="openEditMemberModal(${id})">취소</button>
-      <button class="btn btn-danger" onclick="deleteMember(${id})">삭제</button>
-    </div>
-  `);
-}
-
-function deleteMember(id) {
-  const m = getMember(id);
-  data.members = data.members.filter(x=>x.id!==id);
-  data.reservations = data.reservations.filter(r=>+r.memberId!==+id);
-  if(state.selectedMember===id) state.selectedMember = data.members[0]?.id||null;
-  _closeModal();
-  showToast(`${m.name} 님이 삭제되었습니다.`, 'info');
-  saveData(true);
-  renderAll();
-}
-
-// Confirm / Cancel
-
-function completeRes(resId) {
-  const r = data.reservations.find(x=>+x.id===+resId);
-  if(!r) return;
-  const m = getMember(r.memberId);
-  if(!m) return;
-  if(r.completed) { showToast('이미 이용완료 처리되었습니다.','info'); _closeModal(); return; }
-  r.completed = true;
-  if(m) {
-    m.usedPt = Math.min(m.totalPt, m.usedPt + 1);
-    _closeModal();
-    showToast(`${m.name} 님 이용완료 처리 (잔여 ${getRemainingPt(m.id)}회)`,'success');
-  } else {
-    _closeModal();
-    showToast(`${r.guestName||'방문자'} 님 이용완료 처리`,'success');
-  }
-  renderAll();
-}
-
-function confirmRes(id) {
-  const r=data.reservations.find(x=>+x.id===+id);
-  if(r){
-    r.status='confirmed';
-    notifyMemberConfirmed(r.memberId, r.date, r.hour);
-  }
-  showToast('예약이 확정되었습니다.','success'); renderAll();
-}
-function cancelRes(id) {
-  const r = data.reservations.find(x=>+x.id===+id);
-  if(r && r.memberId) notifyMemberCancelled(r.memberId, r.date, r.hour);
-  data.reservations = data.reservations.filter(x=>+x.id!==+id);
-  data.changeRequests = data.changeRequests.filter(c=>+c.resId!==+id);
-  showToast('예약이 취소되었습니다.','info');
-  saveData(true);
-  renderAll();
-}
-
-// ══════════════════════════════════════════
-//  TOAST
-// ══════════════════════════════════════════
-let toastTimer;
-function showToast(msg, type='info') {
-  const t=document.getElementById('toast');
-  const icons={success:'✓',error:'✕',info:'ℹ'};
-  t.className=`toast ${type}`;
-  document.getElementById('toastIcon').textContent=icons[type];
-  document.getElementById('toastMsg').textContent=msg;
-  t.classList.add('show');
-  clearTimeout(toastTimer);
-  toastTimer=setTimeout(()=>t.classList.remove('show'),3000);
-}
-
-// ══════════════════════════════════════════
-//  RENDER ALL
-// ══════════════════════════════════════════
-function renderAll() {
-  // Firebase 데이터 아직 안 왔으면 렌더 스킵
-  if (!window._fbReady) return;
-  // 로그인 안 됐으면 스킵
-  if (!currentUser) return;
-  // window 전역 동기화
-  window.data = data;
-  window.rid  = rid;
-  window.changeReqId = changeReqId;
-  // 진단 버튼: 트레이너만 표시
-  const diagBtn = document.getElementById('diagBtn');
-  if (diagBtn) diagBtn.style.display = currentUser.role==='trainer' ? 'inline-flex' : 'none';
-  saveData();
-  renderCal();
-  renderSidebarMembers();
-  renderMain();
-}
-
-
-function exportToFile() {
-  const snapshot = JSON.stringify(data);
-
-  // 현재 HTML을 가져와서 data 초기화 라인을 스냅샷으로 교체
-  let html = document.documentElement.outerHTML;
-
-  // "let data = loadData() || ..." 줄을 스냅샷 데이터로 대체
-  // split 방식으로 정규식 없이 안전하게 처리
-  const MARKER = 'let data = loadData()';
-  if (html.includes(MARKER)) {
-    const before = html.substring(0, html.indexOf(MARKER));
-    const after  = html.substring(html.indexOf('\n', html.indexOf(MARKER)) + 1);
-    html = before + 'let data = ' + snapshot + ';\n' + after;
-  }
-
-  const blob = new Blob([html], { type: 'text/html;charset=utf-8' });
-  const url  = URL.createObjectURL(blob);
-  const a    = document.createElement('a');
-  const now  = new Date();
-  const stamp = now.getFullYear() + String(now.getMonth()+1).padStart(2,'0') + String(now.getDate()).padStart(2,'0');
-  a.href     = url;
-  a.download = 'fitsync_' + stamp + '.html';
-  document.body.appendChild(a);
-  a.click();
-  document.body.removeChild(a);
-  URL.revokeObjectURL(url);
-  showToast('저장 완료! 이 파일을 공유하면 데이터가 그대로 전달됩니다.', 'success');
-}
-
-function resetData() {
-  if(!confirm('모든 데이터를 초기화할까요?\n모든 사용자에게 반영됩니다.')) return;
-  data = JSON.parse(JSON.stringify(SEED_DATA));
-  rid  = data.reservations.reduce((mx,r)=>Math.max(mx,r.id),0) + 1;
-  changeReqId = 1;
-  showToast('데이터가 초기화되었습니다.', 'info');
-  renderAll(); // saveData 내부에서 Firestore도 초기화됨
-}
-
-
-// ══════════════════════════════════════════
-//  PUSH NOTIFICATION
-// ══════════════════════════════════════════
-
-// 서비스 워커 등록
-if ('serviceWorker' in navigator) {
-  window.addEventListener('load', () => {
-    navigator.serviceWorker.register('/fitsync/sw.js', { scope: '/fitsync/' })
-      .then(reg => { window._swReg = reg; })
-      .catch(e => console.warn('SW 등록 실패:', e));
-  });
-}
-
-// 알림 권한 요청
-function requestNotificationPermission() {
-  if (!('Notification' in window)) {
-    showToast('이 브라우저는 알림을 지원하지 않습니다.', 'error');
-    return;
-  }
-  if (Notification.permission === 'granted') {
-    showToast('알림이 이미 허용되어 있습니다. ✅', 'success');
-    return;
-  }
-  Notification.requestPermission().then(permission => {
-    if (permission === 'granted') {
-      showToast('알림이 허용되었습니다! 🔔', 'success');
-      startNotificationListener();
-      // FCM 토큰 등록 (백그라운드 알림용)
-      if (window._fcmMessaging) {
-        // VAPID 키: Firebase Console > 프로젝트 설정 > 클라우드 메시징 > 웹 푸시 인증서
-        // 아래 키를 실제 VAPID 공개키로 교체하세요
-        window._fcmMessaging.getToken({
-          vapidKey: 'BGylhemxGoeohzCO-mH2MeqKTeNd39-3QwuR4kfLyzdXBSC75tFap_f1aaVE8SoXXcD0RxmseC2kHqZ3hOBZR_c',
-          serviceWorkerRegistration: window._swReg,
-        }).then(token => {
-          if (token) {
-            console.log('FCM 토큰:', token);
-            // 토큰을 Firestore에 저장 (서버에서 알림 발송 시 사용)
-            if (currentUser && window._docRef) {
-              const tokenKey = currentUser.role === 'trainer'
-                ? 'trainerToken'
-                : 'memberToken_' + currentUser.memberId;
-              window._docRef.collection('tokens').doc(tokenKey).set({
-                token, updatedAt: new Date().toISOString()
-              }).catch(e => console.warn('토큰 저장 실패:', e));
-            }
-          }
-        }).catch(e => console.warn('FCM 토큰 실패:', e));
+      // 사이드바 멤버 리스트 주입
+      const sidebarMembers = document.getElementById('sidebarMembers');
+      sidebarMembers.innerHTML = '';
+      window.data.members.forEach(m => {
+        const item = document.createElement('div');
+        item.className = 'form-group' + (window.state.selectedMember === m.id ? ' selected' : '');
+        item.style.padding = '10px 20px';
+        item.style.borderBottom = '1px solid var(--border)';
+        item.innerHTML = `<span style="font-weight:600; color:var(--accent);">👤 ${m.name}</span> <small style="color:var(--text-muted); float:right;">잔여 ${m.totalPt - m.usedPt}회</small>`;
+        sidebarMembers.appendChild(item);
+      });
+    };
+
+    function openQuickReservationModal(hour = 12) {
+      const targetMember = window.state.selectedMember || (window.data.members[0] ? window.data.members[0].id : null);
+      if(!targetMember) {
+        alert("등록된 회원이 없습니다. 먼저 회원 명단을 추가해주세요.");
+        return;
       }
-      const btn = document.getElementById('notifBtn');
-      if (btn) btn.textContent = '🔔 ON';
-      scheduleReminders();
-    } else {
-      showToast('알림이 거부되었습니다. 브라우저 설정에서 허용해주세요.', 'error');
+      
+      const newRes = {
+        id: window.rid || 1,
+        memberId: targetMember,
+        date: window.state.selectedDate,
+        hour: hour,
+        status: 'confirmed'
+      };
+
+      if(confirm(`${window.state.selectedDate} ${hour}시에 예약을 추가하시겠습니까?`)) {
+        window.data.reservations.push(newRes);
+        window._fbSave(window.data);
+      }
     }
-  });
-}
-
-// 알림 보내기 (서비스 워커 또는 직접)
-function sendNotification(title, body, tag) {
-  if (Notification.permission !== 'granted') return;
-  if (window._swReg) {
-    window._swReg.showNotification(title, {
-      body, tag,
-      icon:    '/fitsync/icon-192.png',
-      vibrate: [200, 100, 200],
-      data:    'https://kwanwoohuh.github.io/fitsync/',
-    });
-  } else {
-    new Notification(title, { body, tag });
-  }
-}
-
-// 하루 전 알림 스케줄링
-function scheduleReminders() {
-  if (Notification.permission !== 'granted') return;
-  if (!currentUser) return;
-
-  const now       = new Date();
-  const tomorrow  = new Date(now);
-  tomorrow.setDate(tomorrow.getDate() + 1);
-  const tomorrowStr = fmt(tomorrow);
-
-  let reminders = [];
-
-  if (currentUser.role === 'trainer') {
-    // 트레이너: 내일 확정 수업 전체
-    const tmRes = data.reservations.filter(r =>
-      r.date === tomorrowStr && r.status === 'confirmed' && !r.completed
-    );
-    if (tmRes.length > 0) {
-      reminders.push({
-        title: '🏋️ 내일 PT 수업 알림',
-        body:  `내일 확정된 수업이 ${tmRes.length}건 있습니다.`,
-        tag:   'trainer-reminder-' + tomorrowStr,
-      });
-    }
-    // 대기 신청 있는 경우
-    const waiting = data.reservations.filter(r =>
-      r.date === tomorrowStr && r.status === 'pending'
-    );
-    if (waiting.length > 0) {
-      reminders.push({
-        title: '⏳ 미확정 예약 알림',
-        body:  `내일 확정 대기 중인 예약이 ${waiting.length}건 있습니다.`,
-        tag:   'trainer-waiting-' + tomorrowStr,
-      });
-    }
-  } else {
-    // 회원: 본인 내일 수업
-    const myId  = currentUser.memberId;
-    const myRes = data.reservations.filter(r =>
-      r.date === tomorrowStr &&
-      +r.memberId === +myId &&
-      (r.status === 'confirmed' || r.status === 'pending') &&
-      !r.completed
-    );
-    if (myRes.length > 0) {
-      const me = getMember(myId);
-      myRes.forEach(r => {
-        reminders.push({
-          title: '🏋️ 내일 PT 수업 알림',
-          body:  `${me?.name || ''}님, 내일 ${r.hour}:00 PT 수업이 있습니다. 잊지 마세요!`,
-          tag:   'member-reminder-' + tomorrowStr + '-' + r.hour,
-        });
-      });
-    }
-  }
-
-  // 오늘 저녁 9시에 알림 보내기
-  const alertTime = new Date(now);
-  alertTime.setHours(21, 0, 0, 0);
-
-  // 이미 9시 지났으면 즉시 테스트 알림 (10초 후)
-  const delay = alertTime > now
-    ? alertTime.getTime() - now.getTime()
-    : 10000;
-
-  reminders.forEach((r, i) => {
-    setTimeout(() => sendNotification(r.title, r.body, r.tag), delay + i * 2000);
-  });
-
-  if (reminders.length > 0) {
-    const timeStr = alertTime > now ? '오늘 저녁 9시에' : '잠시 후';
-    showToast(`${timeStr} 내일 수업 알림 ${reminders.length}건이 예정되었습니다. 🔔`, 'info');
-  }
-}
-
-// 알림 테스트 (즉시)
-function testNotification() {
-  if (Notification.permission !== 'granted') {
-    requestNotificationPermission();
-    return;
-  }
-  sendNotification(
-    '🔔 FITSYNC 알림 테스트',
-    '알림이 정상적으로 작동하고 있습니다!',
-    'test-' + Date.now()
-  );
-  showToast('테스트 알림을 보냈습니다!', 'success');
-}
-
-
-// ── 서비스 워커 캐시 강제 초기화 ──
-if ('serviceWorker' in navigator) {
-  navigator.serviceWorker.getRegistrations().then(regs => {
-    regs.forEach(reg => reg.update());
-  });
-  // 이전 캐시 삭제
-  if ('caches' in window) {
-    caches.keys().then(keys => {
-      keys.filter(k => k !== 'fitsync-v2').forEach(k => caches.delete(k));
-    });
-  }
-}
-
-
-// ══════════════════════════════════════════
-//  FCM NOTIFICATION SYSTEM
-// ══════════════════════════════════════════
-
-function saveFcmToken(token) {
-  if (!currentUser || !window._docRef) return;
-  const tokenKey = currentUser.role === 'trainer'
-    ? 'trainer'
-    : 'member_' + currentUser.memberId;
-  window._docRef.collection('fcmTokens').doc(tokenKey).set({
-    token, role: currentUser.role,
-    memberId: currentUser.memberId || null,
-    updatedAt: new Date().toISOString()
-  }).catch(e => console.warn('토큰 저장 실패:', e));
-}
-
-// 브라우저 알림 직접 발송 (같은 기기)
-function notifyLocal(title, body, tag) {
-  if (Notification.permission !== 'granted') return;
-  const options = { body, tag: tag||'fitsync', icon: '/fitsync/icon-192.png', badge: '/fitsync/icon-192.png', vibrate: [200,100,200] };
-  if (window._swReg) {
-    window._swReg.showNotification(title, options);
-  } else {
-    new Notification(title, options);
-  }
-}
-
-// Firestore를 통한 알림 브로드캐스트
-// 다른 기기에서 읽어서 알림 표시
-function broadcastNotification(payload) {
-  if (!window._docRef) return;
-  window._docRef.collection('notifications').add({
-    ...payload,
-    createdAt: new Date().toISOString(),
-    read: false,
-  }).catch(e => console.warn('알림 저장 실패:', e));
-}
-
-// 알림 수신 리스너 (앱 열려 있을 때)
-let _notifListener = null;
-function startNotificationListener() {
-  if (_notifListener || !window._docRef || !currentUser) return;
-  const myKey = currentUser.role === 'trainer'
-    ? 'trainer'
-    : 'member_' + currentUser.memberId;
-
-  _notifListener = window._docRef.collection('notifications')
-    .where('to', '==', myKey)
-    .where('read', '==', false)
-    .onSnapshot(snap => {
-      snap.docChanges().forEach(change => {
-        if (change.type === 'added') {
-          const n = change.doc.data();
-          // 방금 생성된 것만 (5초 이내)
-          const age = Date.now() - new Date(n.createdAt).getTime();
-          if (age < 5000) {
-            notifyLocal(n.title, n.body, n.tag);
-            showToast(n.body, 'info');
-          }
-          // 읽음 처리
-          change.doc.ref.update({ read: true }).catch(()=>{});
-        }
-      });
-    });
-}
-
-// ── 예약 신청 시 트레이너에게 알림 ──
-function notifyTrainerNewRequest(memberId, date, hour) {
-  const m = getMember(+memberId);
-  if (!m) return;
-  broadcastNotification({
-    to: 'trainer',
-    title: '📬 새 예약 신청',
-    body: `${m.name}님이 ${fmtDisp(date)} ${hour}:00 수업을 신청했습니다.`,
-    tag: 'new-request-' + Date.now(),
-    type: 'new_request',
-  });
-}
-
-// ── 예약 확정 시 회원에게 알림 ──
-function notifyMemberConfirmed(memberId, date, hour) {
-  const m = getMember(+memberId);
-  if (!m) return;
-  broadcastNotification({
-    to: 'member_' + memberId,
-    title: '✅ 예약 확정',
-    body: `${fmtDisp(date)} ${hour}:00 PT 수업이 확정되었습니다!`,
-    tag: 'confirmed-' + Date.now(),
-    type: 'confirmed',
-  });
-}
-
-// ── 예약 취소 시 회원에게 알림 ──
-function notifyMemberCancelled(memberId, date, hour) {
-  broadcastNotification({
-    to: 'member_' + memberId,
-    title: '❌ 예약 취소',
-    body: `${fmtDisp(date)} ${hour}:00 수업 예약이 취소되었습니다.`,
-    tag: 'cancelled-' + Date.now(),
-    type: 'cancelled',
-  });
-}
-
-// ── 변경 승인/거절 시 회원에게 알림 ──
-function notifyChangeResult(memberId, approved, date, hour) {
-  broadcastNotification({
-    to: 'member_' + memberId,
-    title: approved ? '✅ 일정 변경 승인' : '❌ 일정 변경 거절',
-    body: approved
-      ? `${fmtDisp(date)} ${hour}:00 로 일정이 변경되었습니다.`
-      : `일정 변경 신청이 거절되었습니다.`,
-    tag: 'change-result-' + Date.now(),
-    type: 'change_result',
-  });
-}
-
-// ══════════════════════════════════════════
-//  DIAGNOSTIC TOOL
-// ══════════════════════════════════════════
-window.runDiagnostic = function() {
-  const memberMap = {};
-  data.members.forEach(m => { memberMap[+m.id] = m.name; });
-
-  // 전체 예약 데이터 표시 (날짜 오름차순 정렬)
-  const sorted = [...data.reservations].sort((a,b) => {
-    const dc = String(a.date).localeCompare(String(b.date));
-    return dc !== 0 ? dc : +a.hour - +b.hour;
-  });
-
-  if (!sorted.length) {
-    openModal('🔍 진단', `<p style="color:var(--text-muted);text-align:center;padding:20px">예약 없음</p>
-      <div class="modal-actions"><button class="btn btn-primary" onclick="_closeModal()">닫기</button></div>`);
-    return;
-  }
-
-  const rows = sorted.map(r => {
-    const mid        = r.memberId != null ? +r.memberId : null;
-    const foundName  = mid != null ? (memberMap[mid] || null) : null;
-    const displayName = mid != null
-      ? (foundName ? foundName : `❌ id:${r.memberId} 없음`)
-      : (r.guestName || '비회원');
-    const hasError   = mid != null && !foundName;
-    const typeError  = typeof r.hour === 'string' || (r.memberId != null && typeof r.memberId === 'string');
-
-    return `<div style="display:grid;grid-template-columns:90px 40px 120px 1fr;gap:6px;align-items:center;
-        padding:5px 8px;border-radius:6px;margin-bottom:3px;font-size:11px;
-        background:${hasError?'rgba(255,79,123,.1)':typeError?'rgba(255,184,79,.08)':'var(--bg)'}">
-      <span style="color:var(--text-muted)">${r.date}</span>
-      <span style="color:var(--accent);font-weight:700">${r.hour}:00</span>
-      <span style="color:${hasError?'var(--danger)':typeError?'#ffb84f':'var(--member)'};font-weight:600">
-        ${hasError?'❌ ':typeError?'⚠️ ':''}${displayName}
-      </span>
-      <span style="color:var(--text-dim);font-size:10px;font-family:monospace">
-        id:${r.id} mid:${r.memberId}(${typeof r.memberId}) h:${r.hour}(${typeof r.hour})
-      </span>
-    </div>`;
-  }).join('');
-
-  const errorCount = sorted.filter(r => {
-    const mid = r.memberId != null ? +r.memberId : null;
-    return (mid != null && !memberMap[mid]) ||
-           typeof r.hour === 'string' ||
-           (r.memberId != null && typeof r.memberId === 'string');
-  }).length;
-
-  openModal('🔍 전체 예약 데이터', `
-    <div style="display:flex;justify-content:space-between;align-items:center;margin-bottom:10px">
-      <span style="font-size:12px;color:var(--text-muted)">총 ${sorted.length}건
-        ${errorCount > 0 ? `· <span style="color:var(--danger)">❌ ${errorCount}건 오류</span>` : '· <span style="color:var(--member)">✅ 정상</span>'}
-      </span>
-    </div>
-    <div style="max-height:420px;overflow-y:auto">${rows}</div>
-    <div class="modal-actions" style="margin-top:12px">
-      <button class="btn btn-danger btn-sm" onclick="fixAllTypes()">🔧 전체 타입 수정</button>
-      <button class="btn btn-primary" onclick="_closeModal()">닫기</button>
-    </div>
-  `);
-};
-
-window.fixAllTypes = function() {
-  data.reservations = data.reservations.map(r => ({
-    ...r,
-    id:       +r.id,
-    hour:     +r.hour,
-    date:     String(r.date),
-    memberId: r.memberId != null ? +r.memberId : null,
-  }));
-  data.members = data.members.map(m => ({
-    ...m, id:+m.id, totalPt:+m.totalPt, usedPt:+m.usedPt,
-  }));
-  data.trainerSlots = data.trainerSlots.map(s => ({
-    ...s, hour:+s.hour, date:String(s.date),
-  }));
-  data.changeRequests = data.changeRequests.map(c => ({
-    ...c,
-    id:+c.id, resId:+c.resId,
-    memberId: c.memberId!=null?+c.memberId:null,
-    reqHour:  c.reqHour !=null?+c.reqHour :null,
-    reqDate:  c.reqDate ?String(c.reqDate):c.reqDate,
-  }));
-  _closeModal();
-  saveData(true);
-  showToast('타입 수정 완료! Firestore에 저장됩니다.', 'success');
-  setTimeout(() => renderAll(), 800);
-};
-
-// ── INIT ──
-// Firebase 연결 상태 배지 업데이트
-const _fbStatusTimer = setInterval(() => {
-  const badge = document.getElementById('fbStatus');
-  if (!badge) return;
-  if (window._fbReady) {
-    badge.textContent = '🔴';
-    badge.title = '실시간 연결됨';
-    badge.style.background = 'rgba(79,255,176,.1)';
-    badge.style.borderColor = 'rgba(79,255,176,.3)';
-    badge.style.color = 'var(--member)';
-    clearInterval(_fbStatusTimer);
-    // Firebase 준비 완료 후 로그인은 tryRender에서 처리
-  }
-}, 100);
-</script>
+  </script>
 </body>
 </html>
