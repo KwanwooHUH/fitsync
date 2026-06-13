@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>FitSync Pro</title>
+    <!-- 테마 스타일링 -->
     <style>
         :root { --bg-dark: #121214; --card-bg: #1e1e24; --primary: #4fffb0; --text: #ffffff; --text-muted: #a0a0a5; }
         body { background-color: var(--bg-dark); color: var(--text); font-family: 'Pretendard', sans-serif; margin: 0; padding: 20px; }
@@ -21,8 +22,14 @@
         .card { background: var(--card-bg); padding: 20px; border-radius: 12px; box-shadow: 0 4px 12px rgba(0,0,0,0.15); }
         .hidden { display: none !important; }
         h2, h3 { margin-top: 0; color: var(--primary); }
+
+        /* 일정 표 스타일링 */
+        table { width: 100%; border-collapse: collapse; text-align: left; margin-top: 10px; }
+        th { padding: 12px; border-bottom: 2px solid #3f3f48; color: var(--text-muted); font-size: 14px; }
+        td { padding: 12px; border-bottom: 1px solid #2a2a32; font-size: 15px; }
     </style>
 
+    <!-- Firebase v9 Compat SDK & Chart.js 로드 -->
     <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-auth-compat.js"></script>
@@ -33,6 +40,7 @@
 <body>
 
     <div class="container">
+        <!-- [1] 로그인 / 회원가입 화면 -->
         <div id="authZone" class="auth-container">
             <h2>FitSync 로그인</h2>
             <input type="email" id="authEmail" class="form-input" placeholder="이메일 주소">
@@ -47,6 +55,7 @@
             <button class="btn" onclick="handleLogin()">로그인 / 회원가입</button>
         </div>
 
+        <!-- [2] 메인 애플리케이션 화면 -->
         <div id="appZone" class="hidden">
             <header style="display:flex; justify-content:space-between; align-items:center; margin-bottom:30px;">
                 <div>
@@ -56,7 +65,11 @@
                 <button class="btn" style="padding:8px 16px; background:#ff4f4f; color:#fff;" onclick="firebase.auth().signOut()">로그아웃</button>
             </header>
 
-            <div class="grid-layout">
+            <!-- 패널 분기 구조 스위칭 존 -->
+            
+            <!-- [A] 일반 회원 전용 뷰 패널 -->
+            <div id="memberViewPanel" class="grid-layout hidden">
+                <!-- 인바디 등록 및 그래프 카드 -->
                 <div class="card">
                     <h3>🏋️ 신체 변화 추이 (InBody)</h3>
                     <div style="display:flex; gap:10px; margin-bottom:15px;">
@@ -67,6 +80,7 @@
                     <canvas id="inbodyChart" style="width:100%; max-height:220px;"></canvas>
                 </div>
 
+                <!-- 식단 업로드 카드 -->
                 <div class="card">
                     <h3>📸 오늘의 식단 인증</h3>
                     <input type="file" id="dietFile" accept="image/*" class="form-input" style="width:92%;">
@@ -74,9 +88,46 @@
                     <button class="btn" style="width:100%;" onclick="submitDiet()">식단 사진 저장하기</button>
                 </div>
             </div>
+
+            <!-- [B] 트레이너 전용 뷰 패널 (PT 일정 관리) -->
+            <div id="trainerViewPanel" class="grid-layout hidden">
+                <div class="card" style="grid-column: span 2;">
+                    <h3>📅 PT 회원 수업 일정 관리</h3>
+                    
+                    <!-- 일정 입력 폼 -->
+                    <div style="display:flex; gap:10px; margin-bottom:20px; flex-wrap: wrap;">
+                        <input type="text" id="ptClientName" class="form-input" placeholder="회원 이름" style="margin:0; flex:1; min-width:130px;">
+                        <input type="date" id="ptDate" class="form-input" style="margin:0; flex:1; min-width:160px;">
+                        <input type="time" id="ptTime" class="form-input" style="margin:0; flex:1; min-width:110px;">
+                        <input type="text" id="ptMemo" class="form-input" placeholder="수업 메모 (예: 등/이두 루틴)" style="margin:0; flex:2; min-width:200px;">
+                        <button class="btn" style="padding:0 25px; height: 47px;" onclick="submitPtSchedule()">일정 등록</button>
+                    </div>
+                    
+                    <!-- 일정 리스트 출력 테이블 -->
+                    <div style="overflow-x:auto;">
+                        <table>
+                            <thead>
+                                <tr>
+                                    <th>수업 일시</th>
+                                    <th>회원명</th>
+                                    <th>수업 메모 / 루틴</th>
+                                    <th>관리</th>
+                                </tr>
+                            </thead>
+                            <tbody id="ptScheduleList">
+                                <tr>
+                                    <td colspan="4" style="text-align:center; color:var(--text-muted); padding:30px;">일정을 불러오는 중입니다...</td>
+                                </tr>
+                            </tbody>
+                        </table>
+                    </div>
+                </div>
+            </div>
+
         </div>
     </div>
 
+    <!-- 메인 프론트엔드 비즈니스 로직 -->
     <script>
         const firebaseConfig = {
             apiKey: "AIzaSyAmCrwZ1KToKdnHJky5OX3JyD88ZCrzTBE",
@@ -92,23 +143,33 @@
         const auth = firebase.auth();
         const storage = firebase.storage();
         let myChart = null;
-        
-        // 현재 선택된 권한 상태를 추적하는 전역 변수 (기본값: member)
         let currentSelectedRole = 'member';
 
-        // AUTH 상태 감지 엔진
+        // AUTH 상태 감지 엔진 (역할별 화면 완전 분기 구현)
         auth.onAuthStateChanged(user => {
             if (user) {
                 document.getElementById('authZone').classList.add('hidden');
                 document.getElementById('appZone').classList.remove('hidden');
                 initNotification(user.uid);
-                renderInbodyChart(user.uid);
                 
+                // Firestore에서 사용자 권한 판별하여 분기 처리
                 db.collection('users').doc(user.uid).get().then(doc => {
                     if (doc.exists) {
                         const userData = doc.data();
-                        const roleLabel = userData.role === 'trainer' ? '🏋️ 트레이너 권한' : '🏃 일반 회원 권한';
-                        document.getElementById('userRoleBadge').innerText = `${userData.email} [${roleLabel}]`;
+                        
+                        if (userData.role === 'trainer') {
+                            // 트레이너 화면 노출, 회원 화면 숨김
+                            document.getElementById('userRoleBadge').innerText = `${userData.email} [🏋️ 트레이너 권한]`;
+                            document.getElementById('memberViewPanel').classList.add('hidden');
+                            document.getElementById('trainerViewPanel').classList.remove('hidden');
+                            renderPtSchedules(user.uid); // PT 스케줄 로드
+                        } else {
+                            // 회원 화면 노출, 트레이너 화면 숨김
+                            document.getElementById('userRoleBadge').innerText = `${userData.email} [🏃 일반 회원 권한]`;
+                            document.getElementById('trainerViewPanel').classList.add('hidden');
+                            document.getElementById('memberViewPanel').classList.remove('hidden');
+                            renderInbodyChart(user.uid); // 인바디 차트 로드
+                        }
                     } else {
                         document.getElementById('userRoleBadge').innerText = `${user.email} [⚠️ 프로필 정보 없음]`;
                     }
@@ -145,15 +206,12 @@
             if(!email || !password) return alert('이메일과 비밀번호를 입력하세요.');
             if(password.length < 6) return alert('파이어베이스 보안 규칙상 비밀번호는 최소 6자리 이상이어야 합니다.');
 
-            // 1. 우선 로그인을 시도합니다.
             auth.signInWithEmailAndPassword(email, password)
             .then(() => {
                 alert('성공적으로 로그인되었습니다.');
             })
             .catch(error => {
                 if (error.code === 'auth/user-not-found' || error.code === 'auth/invalid-login-credentials') {
-                    
-                    // 2. 가입되지 않은 계정일 경우 사용자가 누른 토글 버튼 상태(currentSelectedRole) 값으로 가입 처리
                     auth.createUserWithEmailAndPassword(email, password)
                         .then(cred => {
                             return db.collection('users').doc(cred.user.uid).set({ 
@@ -178,7 +236,90 @@
             });
         }
 
-        // 인바디 데이터 개별 문서 저장
+        /* ================= 트레이너 전용: PT 일정 비즈니스 로직 ================= */
+        
+        // PT 일정 저장 함수
+        function submitPtSchedule() {
+            const clientName = document.getElementById('ptClientName').value.trim();
+            const date = document.getElementById('ptDate').value;
+            const time = document.getElementById('ptTime').value;
+            const memo = document.getElementById('ptMemo').value.trim();
+            const uid = auth.currentUser.uid;
+
+            if(!clientName || !date || !time) return alert('회원 이름, 날짜, 시간을 모두 입력해 주세요.');
+
+            db.collection('ptSchedules').add({
+                trainerUid: uid,
+                clientName: clientName,
+                date: date,
+                time: time,
+                memo: memo,
+                timestamp: firebase.firestore.FieldValue.serverTimestamp()
+            }).then(() => {
+                alert('PT 수업 일정이 정상적으로 등록되었습니다.');
+                // 입력 필드 초기화
+                document.getElementById('ptClientName').value = '';
+                document.getElementById('ptDate').value = '';
+                document.getElementById('ptTime').value = '';
+                document.getElementById('ptMemo').value = '';
+                renderPtSchedules(uid); // 리스트 갱신
+            }).catch(err => {
+                alert('일정 저장 오류: ' + err.message);
+            });
+        }
+
+        // PT 일정 조회 및 렌더링 함수
+        function renderPtSchedules(uid) {
+            db.collection('ptSchedules').where('trainerUid', '==', uid).get().then(snapshot => {
+                const listBody = document.getElementById('ptScheduleList');
+                listBody.innerHTML = '';
+
+                if(snapshot.empty) {
+                    listBody.innerHTML = `<tr><td colspan="4" style="text-align:center; color:var(--text-muted); padding:30px;">등록된 수업 일정이 없습니다. 첫 일정을 등록해 보세요!</td></tr>`;
+                    return;
+                }
+
+                // 가독성을 위한 날짜/시간 순 정렬 정제 (클라이언트 사이드 안전 소팅)
+                let schedules = [];
+                snapshot.forEach(doc => {
+                    schedules.push({ id: doc.id, ...doc.data() });
+                });
+                schedules.sort((a, b) => {
+                    if (a.date !== b.date) return a.date.localeCompare(b.date);
+                    return a.time.localeCompare(b.time);
+                });
+
+                // 테이블 행 생성
+                schedules.forEach(item => {
+                    const tr = document.createElement('tr');
+                    tr.innerHTML = `
+                        <td style="color:var(--primary); font-weight:bold;">📅 ${item.date} &nbsp;⏰ ${item.time}</td>
+                        <td style="font-weight:500;">${item.clientName} 회원님</td>
+                        <td style="color:var(--text-muted); font-size:14px;">${item.memo || '-'}</td>
+                        <td><button class="btn" style="padding:6px 12px; font-size:13px; background:#ff4f4f; color:#fff;" onclick="deletePtSchedule('${item.id}')">수업 취소</button></td>
+                    `;
+                    listBody.appendChild(tr);
+                });
+            }).catch(err => {
+                console.error("일정 목록 로드 에러:", err);
+            });
+        }
+
+        // PT 일정 삭제(취소) 함수
+        function deletePtSchedule(docId) {
+            if(!confirm('해당 PT 수업 일정을 취소하시겠습니까?')) return;
+            
+            db.collection('ptSchedules').doc(docId).delete().then(() => {
+                alert('수업 일정이 취소되었습니다.');
+                renderPtSchedules(auth.currentUser.uid); // 리스트 재갱신
+            }).catch(err => {
+                alert('일정 삭제 실패: ' + err.message);
+            });
+        }
+
+
+        /* ================= 일반 회원 전용: 인바디 & 식단 비즈니스 로직 ================= */
+
         function submitInbody() {
             const weight = parseFloat(document.getElementById('inbodyWeight').value);
             const muscle = parseFloat(document.getElementById('inbodyMuscle').value);
@@ -198,14 +339,18 @@
             });
         }
 
-        // 인바디 데이터 실시간 차트 구현
         function renderInbodyChart(uid) {
-            db.collection('inbodyLogs').where('uid', '==', uid).orderBy('date', 'asc').get().then(snapshot => {
+            db.collection('inbodyLogs').where('uid', '==', uid).get().then(snapshot => {
                 const labels = [], weights = [], muscles = [];
-                snapshot.forEach(doc => {
-                    labels.push(doc.data().date);
-                    weights.push(doc.data().weight);
-                    muscles.push(doc.data().skeletalMuscle);
+                
+                let logs = [];
+                snapshot.forEach(doc => { logs.push(doc.data()); });
+                logs.sort((a,b) => a.date.localeCompare(b.date));
+
+                logs.forEach(data => {
+                    labels.push(data.date);
+                    weights.push(data.weight);
+                    muscles.push(data.skeletalMuscle);
                 });
 
                 const ctx = document.getElementById('inbodyChart').getContext('2d');
@@ -226,7 +371,6 @@
             });
         }
 
-        // 식단 파일 이미지 Storage 저장 -> Firestore URI 매핑
         function submitDiet() {
             const file = document.getElementById('dietFile').files[0];
             const memo = document.getElementById('dietMemo').value;
@@ -246,7 +390,6 @@
             }).then(() => alert('오늘의 식단 인증 완료!'));
         }
 
-        // 브라우저 FCM 푸시 토큰 획득 및 업데이트
         function initNotification(uid) {
             if ('serviceWorker' in navigator) {
                 navigator.serviceWorker.register('/fitsync/firebase-messaging-sw.js')
