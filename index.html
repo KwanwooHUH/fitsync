@@ -4,7 +4,6 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>FitSync Pro</title>
-    <!-- 테마 스타일링 (기존 스타일에 맞춤) -->
     <style>
         :root { --bg-dark: #121214; --card-bg: #1e1e24; --primary: #4fffb0; --text: #ffffff; --text-muted: #a0a0a5; }
         body { background-color: var(--bg-dark); color: var(--text); font-family: 'Pretendard', sans-serif; margin: 0; padding: 20px; }
@@ -18,7 +17,6 @@
         h2, h3 { margin-top: 0; color: var(--primary); }
     </style>
 
-    <!-- Firebase v9 Compat SDK & Chart.js 로드 -->
     <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-auth-compat.js"></script>
@@ -29,15 +27,13 @@
 <body>
 
     <div class="container">
-        <!-- [1] 로그인 / 회원가입 화면 -->
         <div id="authZone" class="auth-container">
             <h2>FitSync 로그인</h2>
             <input type="email" id="authEmail" class="form-input" placeholder="이메일 주소">
-            <input type="password" id="authPassword" class="form-input" placeholder="비밀번호">
+            <input type="password" id="authPassword" class="form-input" placeholder="비밀번호 (6자리 이상)">
             <button class="btn" onclick="handleLogin()">로그인 / 회원가입</button>
         </div>
 
-        <!-- [2] 메인 애플리케이션 화면 -->
         <div id="appZone" class="hidden">
             <header style="display:flex; justify-content:space-between; align-items:center; margin-bottom:30px;">
                 <h1>FitSync <span style="color:var(--primary); font-size:18px;">Pro v3.0</span></h1>
@@ -45,7 +41,6 @@
             </header>
 
             <div class="grid-layout">
-                <!-- 인바디 등록 및 그래프 카드 -->
                 <div class="card">
                     <h3>🏋️ 신체 변화 추이 (InBody)</h3>
                     <div style="display:flex; gap:10px; margin-bottom:15px;">
@@ -56,7 +51,6 @@
                     <canvas id="inbodyChart" style="width:100%; max-height:220px;"></canvas>
                 </div>
 
-                <!-- 식단 업로드 카드 -->
                 <div class="card">
                     <h3>📸 오늘의 식단 인증</h3>
                     <input type="file" id="dietFile" accept="image/*" class="form-input" style="width:92%;">
@@ -67,7 +61,6 @@
         </div>
     </div>
 
-    <!-- 메인 프론트엔드 비즈니스 로직 -->
     <script>
         const firebaseConfig = {
             apiKey: "AIzaSyAmCrwZ1KToKdnHJky5OX3JyD88ZCrzTBE",
@@ -97,42 +90,48 @@
             }
         });
 
-        // 회원가입 및 로그인 통합 처리 (최신 파이어베이스 보안 정책 반영 버전)
-function handleLogin() {
-    const email = document.getElementById('authEmail').value;
-    const password = document.getElementById('authPassword').value;
-    if(!email || !password) return alert('이메일과 비밀번호를 입력하세요.');
-
-    // 1. 우선 로그인을 시도합니다.
-    auth.signInWithEmailAndPassword(email, password).catch(error => {
-        // 최신 파이어베이스는 보안상 없는 이메일이든, 틀린 비번이든 invalid-login-credentials를 반환합니다.
-        if (error.code === 'auth/user-not-found' || error.code === 'auth/invalid-login-credentials') {
+        // 회원가입 및 로그인 통합 처리 (최신 파이어베이스 보안 정책 완벽 대응 버전)
+        function handleLogin() {
+            const email = document.getElementById('authEmail').value;
+            const password = document.getElementById('authPassword').value;
             
-            // 2. 로그인에 실패했으므로, 가입되지 않은 새 회원이라 가정하고 회원가입을 시도합니다.
-            auth.createUserWithEmailAndPassword(email, password)
-                .then(cred => {
-                    return db.collection('users').doc(cred.user.uid).set({ 
-                        email: email, 
-                        role: 'member', 
-                        createdAt: new Date() 
-                    });
-                })
-                .then(() => {
-                    alert('FitSync Pro에 오신 것을 환영합니다! 회원가입이 완료되었습니다.');
-                })
-                .catch(signUpError => {
-                    // 만약 이미 있는 계정인데 비밀번호를 틀린 거라면 회원가입 시 '이미 사용 중인 이메일' 에러가 뜹니다.
-                    if (signUpError.code === 'auth/email-already-in-use') {
-                        alert('로그인 실패: 비밀번호가 일치하지 않습니다.');
-                    } else {
-                        alert('회원가입 실패: ' + signUpError.message);
-                    }
-                });
-        } else {
-            alert('로그인 실패: ' + error.message);
+            if(!email || !password) return alert('이메일과 비밀번호를 입력하세요.');
+            if(password.length < 6) return alert('파이어베이스 보안 규칙상 비밀번호는 최소 6자리 이상이어야 합니다.');
+
+            // 1. 우선 로그인을 시도합니다.
+            auth.signInWithEmailAndPassword(email, password)
+            .then(() => {
+                alert('성공적으로 로그인되었습니다.');
+            })
+            .catch(error => {
+                // 최신 파이어베이스는 보안상 없는 이메일이든, 틀린 비번이든 auth/invalid-login-credentials를 반환합니다.
+                if (error.code === 'auth/user-not-found' || error.code === 'auth/invalid-login-credentials') {
+                    
+                    // 2. 로그인에 실패했으므로, 가입되지 않은 새 회원이라 가정하고 우회 회원가입을 시도합니다.
+                    auth.createUserWithEmailAndPassword(email, password)
+                        .then(cred => {
+                            return db.collection('users').doc(cred.user.uid).set({ 
+                                email: email, 
+                                role: 'member', 
+                                createdAt: firebase.firestore.FieldValue.serverTimestamp()
+                            });
+                        })
+                        .then(() => {
+                            alert('FitSync Pro에 오신 것을 환영합니다! 신규 가입 및 로그인이 완료되었습니다.');
+                        })
+                        .catch(signUpError => {
+                            // 만약 이미 있는 계정인데 비밀번호만 틀린 거라면 회원가입 시 '이미 사용 중인 이메일' 에러가 뜹니다.
+                            if (signUpError.code === 'auth/email-already-in-use') {
+                                alert('로그인 실패: 비밀번호가 일치하지 않습니다.');
+                            } else {
+                                alert('인증 오류 발생: ' + signUpError.message);
+                            }
+                        });
+                } else {
+                    alert('로그인 실패: ' + error.message);
+                }
+            });
         }
-    });
-}
 
         // 인바디 데이터 개별 문서 저장
         function submitInbody() {
@@ -176,7 +175,9 @@ function handleLogin() {
                         ]
                     },
                     options: { responsive: true, scales: { y: { beginAtZero: false } } }
-                });
+                    });
+            }).catch(err => {
+                console.error("차트 로딩 에러:", err);
             });
         }
 
@@ -209,7 +210,11 @@ function handleLogin() {
                     messaging.getToken({ serviceWorkerRegistration: registration, vapidKey: "YOUR_PUBLIC_VAPID_KEY" })
                     .then(token => {
                         if(token) db.collection('users').doc(uid).update({ fcmToken: token });
+                    }).catch(err => {
+                        console.warn("FCM 토큰 획득 스킵:", err);
                     });
+                }).catch(err => {
+                    console.warn("서비스 워커 등록 실패:", err);
                 });
             }
         }
