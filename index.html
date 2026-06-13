@@ -4,7 +4,6 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>FitSync Pro</title>
-    <!-- 테마 스타일링 -->
     <style>
         :root { --bg-dark: #121214; --card-bg: #1e1e24; --primary: #4fffb0; --text: #ffffff; --text-muted: #a0a0a5; }
         body { background-color: var(--bg-dark); color: var(--text); font-family: 'Pretendard', sans-serif; margin: 0; padding: 20px; }
@@ -29,7 +28,6 @@
         td { padding: 12px; border-bottom: 1px solid #2a2a32; font-size: 15px; }
     </style>
 
-    <!-- Firebase v9 Compat SDK & Chart.js 로드 -->
     <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore-compat.js"></script>
     <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-auth-compat.js"></script>
@@ -40,7 +38,6 @@
 <body>
 
     <div class="container">
-        <!-- [1] 로그인 / 회원가입 화면 -->
         <div id="authZone" class="auth-container">
             <h2>FitSync 로그인</h2>
             <input type="email" id="authEmail" class="form-input" placeholder="이메일 주소">
@@ -55,7 +52,6 @@
             <button class="btn" onclick="handleLogin()">로그인 / 회원가입</button>
         </div>
 
-        <!-- [2] 메인 애플리케이션 화면 -->
         <div id="appZone" class="hidden">
             <header style="display:flex; justify-content:space-between; align-items:center; margin-bottom:30px;">
                 <div>
@@ -65,11 +61,7 @@
                 <button class="btn" style="padding:8px 16px; background:#ff4f4f; color:#fff;" onclick="firebase.auth().signOut()">로그아웃</button>
             </header>
 
-            <!-- 패널 분기 구조 스위칭 존 -->
-            
-            <!-- [A] 일반 회원 전용 뷰 패널 -->
             <div id="memberViewPanel" class="grid-layout hidden">
-                <!-- 인바디 등록 및 그래프 카드 -->
                 <div class="card">
                     <h3>🏋️ 신체 변화 추이 (InBody)</h3>
                     <div style="display:flex; gap:10px; margin-bottom:15px;">
@@ -80,7 +72,6 @@
                     <canvas id="inbodyChart" style="width:100%; max-height:220px;"></canvas>
                 </div>
 
-                <!-- 식단 업로드 카드 -->
                 <div class="card">
                     <h3>📸 오늘의 식단 인증</h3>
                     <input type="file" id="dietFile" accept="image/*" class="form-input" style="width:92%;">
@@ -89,12 +80,10 @@
                 </div>
             </div>
 
-            <!-- [B] 트레이너 전용 뷰 패널 (PT 일정 관리) -->
             <div id="trainerViewPanel" class="grid-layout hidden">
                 <div class="card" style="grid-column: span 2;">
                     <h3>📅 PT 회원 수업 일정 관리</h3>
                     
-                    <!-- 일정 입력 폼 -->
                     <div style="display:flex; gap:10px; margin-bottom:20px; flex-wrap: wrap;">
                         <input type="text" id="ptClientName" class="form-input" placeholder="회원 이름" style="margin:0; flex:1; min-width:130px;">
                         <input type="date" id="ptDate" class="form-input" style="margin:0; flex:1; min-width:160px;">
@@ -103,7 +92,6 @@
                         <button class="btn" style="padding:0 25px; height: 47px;" onclick="submitPtSchedule()">일정 등록</button>
                     </div>
                     
-                    <!-- 일정 리스트 출력 테이블 -->
                     <div style="overflow-x:auto;">
                         <table>
                             <thead>
@@ -127,7 +115,6 @@
         </div>
     </div>
 
-    <!-- 메인 프론트엔드 비즈니스 로직 -->
     <script>
         const firebaseConfig = {
             apiKey: "AIzaSyAmCrwZ1KToKdnHJky5OX3JyD88ZCrzTBE",
@@ -145,36 +132,51 @@
         let myChart = null;
         let currentSelectedRole = 'member';
 
-        // AUTH 상태 감지 엔진 (역할별 화면 완전 분기 구현)
+        // AUTH 상태 감지 엔진 (방어적 예외 처리 전면 보강)
         auth.onAuthStateChanged(user => {
             if (user) {
                 document.getElementById('authZone').classList.add('hidden');
                 document.getElementById('appZone').classList.remove('hidden');
-                initNotification(user.uid);
                 
-                // Firestore에서 사용자 권한 판별하여 분기 처리
+                // 알림 초기화 에러가 메인 흐름을 막지 않도록 예외 처리
+                try {
+                    initNotification(user.uid);
+                } catch(e) {
+                    console.warn("알림 모듈 건너뜀:", e);
+                }
+                
+                // Firestore 권한 조회 및 안전장치 
                 db.collection('users').doc(user.uid).get().then(doc => {
-                    if (doc.exists) {
-                        const userData = doc.data();
-                        
-                        if (userData.role === 'trainer') {
-                            // 트레이너 화면 노출, 회원 화면 숨김
-                            document.getElementById('userRoleBadge').innerText = `${userData.email} [🏋️ 트레이너 권한]`;
-                            document.getElementById('memberViewPanel').classList.add('hidden');
-                            document.getElementById('trainerViewPanel').classList.remove('hidden');
-                            renderPtSchedules(user.uid); // PT 스케줄 로드
-                        } else {
-                            // 회원 화면 노출, 트레이너 화면 숨김
-                            document.getElementById('userRoleBadge').innerText = `${userData.email} [🏃 일반 회원 권한]`;
-                            document.getElementById('trainerViewPanel').classList.add('hidden');
-                            document.getElementById('memberViewPanel').classList.remove('hidden');
-                            renderInbodyChart(user.uid); // 인바디 차트 로드
-                        }
+                    if (doc.exists && doc.data().role === 'trainer') {
+                        // [1] 확실한 트레이너 계정인 경우
+                        document.getElementById('userRoleBadge').innerText = `${user.email} [🏋️ 트레이너 권한]`;
+                        document.getElementById('memberViewPanel').classList.add('hidden');
+                        document.getElementById('trainerViewPanel').classList.remove('hidden');
+                        renderPtSchedules(user.uid);
                     } else {
-                        document.getElementById('userRoleBadge').innerText = `${user.email} [⚠️ 프로필 정보 없음]`;
+                        // [2] 일반 회원이거나, 혹은 정보가 꼬여 DB에 프로필 데이터가 누락된 경우 -> 강제로 회원 대시보드라도 오픈
+                        const roleText = (doc.exists && doc.data().role) ? '일반 회원 권한' : '임시 임반 회원 권한(프로필 자동 보정)';
+                        document.getElementById('userRoleBadge').innerText = `${user.email} [🏃 ${roleText}]`;
+                        document.getElementById('trainerViewPanel').classList.add('hidden');
+                        document.getElementById('memberViewPanel').classList.remove('hidden');
+                        renderInbodyChart(user.uid);
+                        
+                        // 데이터 유실 방지를 위한 자동 보정 업서트
+                        if(!doc.exists) {
+                            db.collection('users').doc(user.uid).set({
+                                email: user.email,
+                                role: 'member',
+                                createdAt: firebase.firestore.FieldValue.serverTimestamp()
+                            }, { merge: true });
+                        }
                     }
                 }).catch(err => {
-                    console.error("유저 권한 조회 에러:", err);
+                    // [3] 파이어베이스 권한 규칙 에러 등 네트워크 먹통 시 무조건 회원 화면이라도 열어줌
+                    console.error("안전 엔진 작동 - 권한 로드 오류 대피:", err);
+                    document.getElementById('userRoleBadge').innerText = `${user.email} [⚠️ 오프라인/보안 모드]`;
+                    document.getElementById('trainerViewPanel').classList.add('hidden');
+                    document.getElementById('memberViewPanel').classList.remove('hidden');
+                    renderInbodyChart(user.uid);
                 });
 
             } else {
@@ -237,8 +239,6 @@
         }
 
         /* ================= 트레이너 전용: PT 일정 비즈니스 로직 ================= */
-        
-        // PT 일정 저장 함수
         function submitPtSchedule() {
             const clientName = document.getElementById('ptClientName').value.trim();
             const date = document.getElementById('ptDate').value;
@@ -257,18 +257,16 @@
                 timestamp: firebase.firestore.FieldValue.serverTimestamp()
             }).then(() => {
                 alert('PT 수업 일정이 정상적으로 등록되었습니다.');
-                // 입력 필드 초기화
                 document.getElementById('ptClientName').value = '';
                 document.getElementById('ptDate').value = '';
                 document.getElementById('ptTime').value = '';
                 document.getElementById('ptMemo').value = '';
-                renderPtSchedules(uid); // 리스트 갱신
+                renderPtSchedules(uid);
             }).catch(err => {
                 alert('일정 저장 오류: ' + err.message);
             });
         }
 
-        // PT 일정 조회 및 렌더링 함수
         function renderPtSchedules(uid) {
             db.collection('ptSchedules').where('trainerUid', '==', uid).get().then(snapshot => {
                 const listBody = document.getElementById('ptScheduleList');
@@ -279,17 +277,13 @@
                     return;
                 }
 
-                // 가독성을 위한 날짜/시간 순 정렬 정제 (클라이언트 사이드 안전 소팅)
                 let schedules = [];
-                snapshot.forEach(doc => {
-                    schedules.push({ id: doc.id, ...doc.data() });
-                });
+                snapshot.forEach(doc => { schedules.push({ id: doc.id, ...doc.data() }); });
                 schedules.sort((a, b) => {
                     if (a.date !== b.date) return a.date.localeCompare(b.date);
                     return a.time.localeCompare(b.time);
                 });
 
-                // 테이블 행 생성
                 schedules.forEach(item => {
                     const tr = document.createElement('tr');
                     tr.innerHTML = `
@@ -305,21 +299,17 @@
             });
         }
 
-        // PT 일정 삭제(취소) 함수
         function deletePtSchedule(docId) {
             if(!confirm('해당 PT 수업 일정을 취소하시겠습니까?')) return;
-            
             db.collection('ptSchedules').doc(docId).delete().then(() => {
                 alert('수업 일정이 취소되었습니다.');
-                renderPtSchedules(auth.currentUser.uid); // 리스트 재갱신
+                renderPtSchedules(auth.currentUser.uid);
             }).catch(err => {
                 alert('일정 삭제 실패: ' + err.message);
             });
         }
 
-
         /* ================= 일반 회원 전용: 인바디 & 식단 비즈니스 로직 ================= */
-
         function submitInbody() {
             const weight = parseFloat(document.getElementById('inbodyWeight').value);
             const muscle = parseFloat(document.getElementById('inbodyMuscle').value);
@@ -342,7 +332,6 @@
         function renderInbodyChart(uid) {
             db.collection('inbodyLogs').where('uid', '==', uid).get().then(snapshot => {
                 const labels = [], weights = [], muscles = [];
-                
                 let logs = [];
                 snapshot.forEach(doc => { logs.push(doc.data()); });
                 logs.sort((a,b) => a.date.localeCompare(b.date));
