@@ -132,36 +132,31 @@
         let myChart = null;
         let currentSelectedRole = 'member';
 
-        // AUTH 상태 감지 엔진 (방어적 예외 처리 전면 보강)
+        // AUTH 상태 감지 엔진
         auth.onAuthStateChanged(user => {
             if (user) {
                 document.getElementById('authZone').classList.add('hidden');
                 document.getElementById('appZone').classList.remove('hidden');
                 
-                // 알림 초기화 에러가 메인 흐름을 막지 않도록 예외 처리
                 try {
                     initNotification(user.uid);
                 } catch(e) {
                     console.warn("알림 모듈 건너뜀:", e);
                 }
                 
-                // Firestore 권한 조회 및 안전장치 
+                // Firestore 권한 조회 실시간 동기화
                 db.collection('users').doc(user.uid).get().then(doc => {
                     if (doc.exists && doc.data().role === 'trainer') {
-                        // [1] 확실한 트레이너 계정인 경우
                         document.getElementById('userRoleBadge').innerText = `${user.email} [🏋️ 트레이너 권한]`;
                         document.getElementById('memberViewPanel').classList.add('hidden');
                         document.getElementById('trainerViewPanel').classList.remove('hidden');
                         renderPtSchedules(user.uid);
                     } else {
-                        // [2] 일반 회원이거나, 혹은 정보가 꼬여 DB에 프로필 데이터가 누락된 경우 -> 강제로 회원 대시보드라도 오픈
-                        const roleText = (doc.exists && doc.data().role) ? '일반 회원 권한' : '임시 임반 회원 권한(프로필 자동 보정)';
-                        document.getElementById('userRoleBadge').innerText = `${user.email} [🏃 ${roleText}]`;
+                        document.getElementById('userRoleBadge').innerText = `${user.email} [🏃 일반 회원 권한]`;
                         document.getElementById('trainerViewPanel').classList.add('hidden');
                         document.getElementById('memberViewPanel').classList.remove('hidden');
                         renderInbodyChart(user.uid);
                         
-                        // 데이터 유실 방지를 위한 자동 보정 업서트
                         if(!doc.exists) {
                             db.collection('users').doc(user.uid).set({
                                 email: user.email,
@@ -171,9 +166,8 @@
                         }
                     }
                 }).catch(err => {
-                    // [3] 파이어베이스 권한 규칙 에러 등 네트워크 먹통 시 무조건 회원 화면이라도 열어줌
-                    console.error("안전 엔진 작동 - 권한 로드 오류 대피:", err);
-                    document.getElementById('userRoleBadge').innerText = `${user.email} [⚠️ 오프라인/보안 모드]`;
+                    console.error("권한 로드 오류:", err);
+                    document.getElementById('userRoleBadge').innerText = `${user.email} [🏃 일반 회원 권한 - 기본값]`;
                     document.getElementById('trainerViewPanel').classList.add('hidden');
                     document.getElementById('memberViewPanel').classList.remove('hidden');
                     renderInbodyChart(user.uid);
@@ -200,20 +194,28 @@
             }
         }
 
-        // 회원가입 및 로그인 통합 처리
+        // 회원가입 및 로그인 통합 처리 (★ 로그인 성공 시 선택한 역할로 강제 업데이트 로직 추가)
         function handleLogin() {
             const email = document.getElementById('authEmail').value;
             const password = document.getElementById('authPassword').value;
             
             if(!email || !password) return alert('이메일과 비밀번호를 입력하세요.');
-            if(password.length < 6) return alert('파이어베이스 보안 규칙상 비밀번호는 최소 6자리 이상이어야 합니다.');
+            if(password.length < 6) return alert('비밀번호는 최소 6자리 이상이어야 합니다.');
 
             auth.signInWithEmailAndPassword(email, password)
+            .then((cred) => {
+                // 로그인에 성공하면, 현재 화면에서 선택한 역할(member 또는 trainer)로 데이터베이스 정보를 강제 동기화합니다.
+                return db.collection('users').doc(cred.user.uid).set({ 
+                    email: email, 
+                    role: currentSelectedRole 
+                }, { merge: true });
+            })
             .then(() => {
                 alert('성공적으로 로그인되었습니다.');
             })
             .catch(error => {
-                if (error.code === 'auth/user-not-found' || error.code === 'auth/invalid-login-credentials') {
+                // 신규 회원 가입 처리
+                if (error.code === 'auth/user-not-found' || error.code === 'auth/invalid-login-credentials' || error.code === 'auth/cannot-find-user') {
                     auth.createUserWithEmailAndPassword(email, password)
                         .then(cred => {
                             return db.collection('users').doc(cred.user.uid).set({ 
@@ -226,14 +228,10 @@
                             alert('FitSync Pro에 오신 것을 환영합니다! 신규 가입 및 로그인이 완료되었습니다.');
                         })
                         .catch(signUpError => {
-                            if (signUpError.code === 'auth/email-already-in-use') {
-                                alert('로그인 실패: 비밀번호가 일치하지 않습니다.');
-                            } else {
-                                alert('인증 오류 발생: ' + signUpError.message);
-                            }
+                            alert('가입 오류: ' + signUpError.message);
                         });
                 } else {
-                    alert('로그인 실패: ' + error.message);
+                    alert('로그인 실패: 비밀번호가 틀렸거나 다른 오류가 발생했습니다.');
                 }
             });
         }
