@@ -97,22 +97,42 @@
             }
         });
 
-        // 회원가입 및 로그인 통합 처리
-        function handleLogin() {
-            const email = document.getElementById('authEmail').value;
-            const password = document.getElementById('authPassword').value;
-            if(!email || !password) return alert('이메일과 비밀번호를 입력하세요.');
+        // 회원가입 및 로그인 통합 처리 (최신 파이어베이스 보안 정책 반영 버전)
+function handleLogin() {
+    const email = document.getElementById('authEmail').value;
+    const password = document.getElementById('authPassword').value;
+    if(!email || !password) return alert('이메일과 비밀번호를 입력하세요.');
 
-            auth.signInWithEmailAndPassword(email, password).catch(error => {
-                if (error.code === 'auth/user-not-found') {
-                    auth.createUserWithEmailAndPassword(email, password)
-                        .then(cred => db.collection('users').doc(cred.user.uid).set({ email, role: 'member', createdAt: new Date() }))
-                        .catch(err => alert('회원가입 실패: ' + err.message));
-                } else {
-                    alert('로그인 실패: ' + error.message);
-                }
-            });
+    // 1. 우선 로그인을 시도합니다.
+    auth.signInWithEmailAndPassword(email, password).catch(error => {
+        // 최신 파이어베이스는 보안상 없는 이메일이든, 틀린 비번이든 invalid-login-credentials를 반환합니다.
+        if (error.code === 'auth/user-not-found' || error.code === 'auth/invalid-login-credentials') {
+            
+            // 2. 로그인에 실패했으므로, 가입되지 않은 새 회원이라 가정하고 회원가입을 시도합니다.
+            auth.createUserWithEmailAndPassword(email, password)
+                .then(cred => {
+                    return db.collection('users').doc(cred.user.uid).set({ 
+                        email: email, 
+                        role: 'member', 
+                        createdAt: new Date() 
+                    });
+                })
+                .then(() => {
+                    alert('FitSync Pro에 오신 것을 환영합니다! 회원가입이 완료되었습니다.');
+                })
+                .catch(signUpError => {
+                    // 만약 이미 있는 계정인데 비밀번호를 틀린 거라면 회원가입 시 '이미 사용 중인 이메일' 에러가 뜹니다.
+                    if (signUpError.code === 'auth/email-already-in-use') {
+                        alert('로그인 실패: 비밀번호가 일치하지 않습니다.');
+                    } else {
+                        alert('회원가입 실패: ' + signUpError.message);
+                    }
+                });
+        } else {
+            alert('로그인 실패: ' + error.message);
         }
+    });
+}
 
         // 인바디 데이터 개별 문서 저장
         function submitInbody() {
