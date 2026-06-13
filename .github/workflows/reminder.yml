@@ -1,0 +1,27 @@
+name: FitSync Daily PT Reminder
+
+on:
+  schedule:
+    # 매일 한국 시간(KST) 오전 10시 정각에 자동으로 실행 (UTC 시간 기준 01:00)
+    - cron: '0 1 * * *'
+  workflow_dispatch: # 필요한 경우 깃허브 웹에서 수동으로 실행해볼 수 있는 버튼 생성
+
+jobs:
+  run-reminder:
+    runs-on: ubuntu-latest
+    steps:
+      - name: 소스코드 가져오기
+        uses: actions/checkout@v3
+
+      - name: Node.js 환경 세팅
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+
+      - name: 필요한 라이브러리 설치
+        run: npm install firebase-admin
+
+      - name: 알림 스크립트 실행
+        env:
+          FIREBASE_SERVICE_ACCOUNT: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+        run: node reminder.js
