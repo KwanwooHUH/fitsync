@@ -11,13 +11,15 @@
 <title>PT 스케줄 관리 - FitSync Pro</title>
 
 <!-- Firebase SDK (compat, iOS Safari 호환 및 인증/스토어 지원) -->
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-app-compat.js" crossorigin="anonymous"></script>
+<script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-firestore-compat.js" crossorigin="anonymous"></script>
 <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-auth-compat.js" crossorigin="anonymous"></script>
 <script src="https://www.gstatic.com/firebasejs/9.23.0/firebase-storage-compat.js" crossorigin="anonymous"></script>
 <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
 
 <script>
 (function() {
-  // 기존 프로젝트의 Firebase 설정 유지
+  // 기존 설정 유지
   const firebaseConfig = {
     apiKey:            "AIzaSyAmCrwZ1KToKdnHJky5OX3JyD88ZCrzTBE",
     authDomain:        "fitsync-9f15d.firebaseapp.com",
@@ -30,6 +32,108 @@
   
   const db = firebase.firestore();
   const auth = firebase.auth();
+  const storage = firebase.storage();
+
+  // ── 1&2. AUTH 및 FIRESTORE 독립 컬렉션 실시간 매핑 ──
+  auth.onAuthStateChanged(async (user) => {
+    if (user) {
+      const userDoc = await db.collection('users').doc(user.uid).get();
+      if (userDoc.exists) {
+        window.currentUser = { uid: user.uid, ...userDoc.data() };
+        // 토큰 저장 (알림용)
+        setupFCMToken(user.uid);
+      }
+      document.getElementById('authZone').style.display = 'none';
+      document.getElementById('appZone').style.display = 'block';
+      loadUserDashboard();
+    } else {
+      document.getElementById('appZone').style.display = 'none';
+      document.getElementById('authZone').style.display = 'flex';
+    }
+  });
+
+  // ── 5. 체중 및 인바디 데이터 저장 함수 ──
+  window.saveInbodyData = function(weight, muscle, fat) {
+    if(!window.currentUser) return;
+    db.collection('inbodyLogs').add({
+      uid: window.currentUser.uid,
+      date: new Date().toISOString().split('T')[0],
+      weight: parseFloat(weight),
+      skeletalMuscle: parseFloat(muscle),
+      bodyFatPct: parseFloat(fat),
+      timestamp: firebase.firestore.FieldValue.serverTimestamp()
+    }).then(() => {
+      alert("인바디 정보가 안전하게 기록되었습니다.");
+      renderInbodyChart();
+    });
+  };
+
+  // ── 6. 식단 사진 업로드 기능 (Firebase Storage 연동) ──
+  window.uploadDietImage = function(file, memo) {
+    if(!window.currentUser || !file) return;
+    
+    const fileRef = storage.ref(`diets/${window.currentUser.uid}/${Date.now()}_${file.name}`);
+    fileRef.put(file).then(snapshot => snapshot.ref.getDownloadURL())
+    .then(downloadURL => {
+      // 이미지 주소를 Firestore에 기록
+      return db.collection('dietLogs').add({
+        uid: window.currentUser.uid,
+        date: new Date().toISOString().split('T')[0],
+        imageUrl: downloadURL,
+        memo: memo,
+        timestamp: firebase.firestore.FieldValue.serverTimestamp()
+      });
+    }).then(() => {
+      alert("오늘의 식단 사진 업로드 완료!");
+    }).catch(err => alert("업로드 실패: " + err.message));
+  };
+
+  // ── 4. Chart.js 활용 통계 그래프 렌더링 ──
+  window.renderInbodyChart = function() {
+    db.collection('inbodyLogs')
+      .where('uid', '==', window.currentUser.uid)
+      .orderBy('date', 'asc').get().then(snapshot => {
+        const labels = [];
+        const weights = [];
+        snapshot.forEach(doc => {
+          labels.push(doc.data().date);
+          weights.push(doc.data().weight);
+        });
+
+        const ctx = document.getElementById('inbodyChart').getContext('2d');
+        if(window.myChart) window.myChart.destroy(); // 기존 차트 초기화
+        window.myChart = new Chart(ctx, {
+          type: 'line',
+          data: {
+            labels: labels,
+            datasets: [{
+              label: '체중 변화 추이 (kg)',
+              data: weights,
+              borderColor: '#4fffb0',
+              backgroundColor: 'rgba(79,255,176,0.1)',
+              tension: 0.2
+            }]
+          },
+          options: { responsive: true }
+        });
+      });
+  };
+})();
+</script>
+
+<div id="appZone" style="display:none;">
+  <div class="stat-section">
+    <h3>📊 내 신체 변화 그래프</h3>
+    <canvas id="inbodyChart" style="width:100%; max-height:300px;"></canvas>
+  </div>
+  
+  <div class="diet-section">
+    <h3>📸 오늘 먹은 식단 인증하기</h3>
+    <input type="file" id="dietFileInput" accept="image/*">
+    <input type="text" id="dietMemoInput" placeholder="식단 메모를 적어주세요.">
+    <button onclick="uploadDietImage(document.getElementById('dietFileInput').files[0], document.getElementById('dietMemoInput').value)">식단 저장</button>
+  </div>
+</div>
   
   window._db = db;
   window._auth = auth;
